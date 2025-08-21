@@ -1,60 +1,23 @@
-# Browser History Topic Graph - Chrome Extension
+# Cognitive Trails
 
-A Chrome extension that visualizes your browser history as an interactive graph in a full browser tab, grouping websites by topics and showing connections between frequently visited domains.
-
-## Features
-
-- **Topic-based Clustering**: Automatically categorizes websites into topics using semantic analysis
-- **Interactive Graph**: Force-directed graph visualization using D3.js with pan and zoom
-- **Session Connections**: Shows links between domains visited within the same session (1 hour window)
-- **Full Tab Interface**: Opens in a dedicated browser tab for maximum viewing space
-- **Visual Indicators**: 
-  - Node size represents visit frequency
-  - Color coding by topic category
-  - Hover tooltips with detailed information
-  - Dynamic legend showing all categories
-- **Enhanced Semantic Clustering**: Uses multi-factor analysis including URL patterns, keywords, and content classification
+A Chrome extension that visualizes your browser history as an interactive graph, showing how your websites connect by topic.
 
 ## Installation
 
-1. **Download the Extension**
-   - Clone this repository or download all files to a folder
+1. Download or clone this repository
+2. Open Chrome → `chrome://extensions/`
+3. Enable "Developer mode" 
+4. Click "Load unpacked" → Select the downloaded folder
+5. Click the extension icon to open
 
-2. **Load in Chrome Developer Mode**
-   - Open Chrome and navigate to `chrome://extensions/`
-   - Enable "Developer mode" in the top-right corner
-   - Click "Load unpacked" button
-   - Select the folder containing the extension files
-   - The extension icon should appear in your Chrome toolbar
+## Features
 
-3. **Grant Permissions**
-   - Click on the extension icon
-   - Chrome will open a new tab and may prompt for history access permissions
-   - Click "Allow" to grant necessary permissions
+- Interactive graph of your browsing history
+- Automatic topic clustering (Programming, Social, News, etc.)
+- Pan and zoom to explore connections
+- Full browser tab interface
 
-## Usage
-
-1. **View Your History Graph**
-   - Click the extension icon in the Chrome toolbar
-   - A new browser tab will open with the history graph interface
-   - The app will analyze your browser history and create topic clusters
-   - Wait for the graph to render (may take a few seconds for large datasets)
-
-2. **Interact with the Graph**
-   - **Pan and Zoom**: Use mouse wheel to zoom, click and drag to pan
-   - **Drag nodes** to reposition them manually
-   - **Hover over nodes** to see detailed information (domain, visit count, cluster, last visit date)
-   - **Use zoom controls** in the bottom-right corner for precise navigation
-   - **Click refresh** to reload with updated history data
-
-3. **Understanding the Visualization**
-   - **Node Colors**: Each color represents a different topic cluster
-   - **Node Sizes**: Larger nodes = more visits to that domain
-   - **Connections**: Lines show domains visited in the same browsing session
-   - **Legend**: Dynamic legend showing all discovered topic categories
-   - **Auto-fitting**: Graph automatically centers and scales after loading
-
-## Technical Details
+Built with D3.js
 
 ### File Structure
 ```
