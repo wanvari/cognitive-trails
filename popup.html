@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Browser History Topic Graph</title>
+  <link rel="stylesheet" href="popup.css">
+  <script src="d3.min.js"></script>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Browser History Topic Graph</h1>
+      <div class="controls">
+        <div class="buttons">
+          <button id="refresh-btn">Refresh</button>
+        </div>
+      </div>
+      <!-- Legend will be inserted here by JavaScript -->
+    </header>
+    <div id="graph-container">
+      <svg id="graph"></svg>
+    </div>
+    <div id="loading" class="loading">Loading history data...</div>
+    <div id="tooltip" class="tooltip"></div>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>

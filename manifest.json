@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "Browser History Topic Graph",
+  "version": "1.0",
+  "description": "Visualize your browser history as a topic-based graph",
+  "permissions": [
+    "history"
+  ],
+  "action": {
+    "default_title": "Open History Graph"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "icons": {
+    "16": "icon16.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'"
+  }
+}
