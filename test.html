@@ -3,18 +3,17 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Cognitive Trails</title>
+  <title>Cognitive Trails - Test Mode</title>
   <link rel="stylesheet" href="popup.css">
   <script src="d3.min.js"></script>
 </head>
 <body>
   <div class="container">
     <header>
-      <h1>Cognitive Trails</h1>
+      <h1>Cognitive Trails - Test Mode</h1>
       <div class="controls">
         <div class="buttons">
-          <button id="refresh-btn">Refresh</button>
-          <button id="test-btn">Test Mode</button>
+          <button id="refresh-btn">Refresh Test Data</button>
         </div>
       </div>
       <!-- Legend will be inserted here by JavaScript -->
@@ -22,9 +21,17 @@
     <div id="graph-container">
       <svg id="graph"></svg>
     </div>
-    <div id="loading" class="loading">Loading history data...</div>
+    <div id="loading" class="loading">Loading test data...</div>
     <div id="tooltip" class="tooltip"></div>
   </div>
   <script src="popup.js"></script>
+  <script>
+    // Force test mode
+    document.addEventListener('DOMContentLoaded', () => {
+      console.log('Running in test mode');
+      const visualizer = new HistoryGraphVisualizer();
+      visualizer.loadTestData();
+    });
+  </script>
 </body>
 </html>

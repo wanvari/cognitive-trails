@@ -1,55 +1,29 @@
-// Enhanced semantic clustering configuration
-const SIMILARITY_THRESHOLD = 0.6;
-const MIN_CLUSTER_SIZE = 2;
+// Cognitive Transition Analysis for Browser History
+// Analyzes how the user's attention flows between different types of content
+
 const FILTERED_DOMAINS = ['google.com', 'www.google.com', 'bing.com', 'duckduckgo.com'];
 
-// Enhanced topic keywords with weights and context
-const ENHANCED_TOPICS = {
-  'programming': {
-    domains: ['github.com', 'stackoverflow.com', 'codepen.io', 'jsfiddle.net', 'replit.com', 'glitch.com'],
-    keywords: ['javascript', 'python', 'react', 'vue', 'angular', 'node', 'api', 'code', 'programming', 'developer', 'tutorial', 'documentation', 'git', 'repository', 'function', 'class', 'method'],
-    paths: ['docs', 'api', 'tutorial', 'guide', 'reference', 'dev', 'developer'],
-    weight: 1.5
-  },
-  'social': {
-    domains: ['facebook.com', 'twitter.com', 'instagram.com', 'linkedin.com', 'reddit.com', 'discord.com', 'telegram.org'],
-    keywords: ['social', 'post', 'share', 'comment', 'like', 'follow', 'friend', 'message', 'chat', 'community'],
-    paths: ['profile', 'posts', 'messages', 'feed'],
-    weight: 1.3
-  },
-  'ecommerce': {
-    domains: ['amazon.com', 'ebay.com', 'etsy.com', 'shopify.com', 'walmart.com', 'target.com'],
-    keywords: ['buy', 'shop', 'cart', 'purchase', 'price', 'product', 'store', 'sale', 'deal', 'order'],
-    paths: ['product', 'cart', 'checkout', 'shop', 'store'],
-    weight: 1.4
-  },
-  'news': {
-    domains: ['bbc.com', 'cnn.com', 'reuters.com', 'nytimes.com', 'guardian.com', 'techcrunch.com'],
-    keywords: ['news', 'article', 'breaking', 'report', 'story', 'politics', 'world', 'business', 'technology'],
-    paths: ['news', 'article', 'story', 'politics', 'world'],
-    weight: 1.2
-  },
-  'entertainment': {
-    domains: ['youtube.com', 'netflix.com', 'spotify.com', 'twitch.tv', 'hulu.com', 'disney.com'],
-    keywords: ['video', 'music', 'movie', 'show', 'stream', 'watch', 'play', 'entertainment', 'game', 'gaming'],
-    paths: ['watch', 'video', 'music', 'playlist', 'game'],
-    weight: 1.1
-  },
-  'education': {
-    domains: ['coursera.org', 'udemy.com', 'khan.academy', 'edx.org', 'codecademy.com', 'freecodecamp.org'],
-    keywords: ['course', 'lesson', 'learn', 'education', 'tutorial', 'training', 'study', 'class', 'university'],
-    paths: ['course', 'lesson', 'learn', 'tutorial', 'class'],
-    weight: 1.3
-  }
+// Transition type colors for connection lines
+const TRANSITION_COLORS = {
+  'related': '#4285f4',        // Blue - staying on topic
+  'topic_shift': '#f4b942',   // Yellow - moderate cognitive jump  
+  'context_switch': '#ea4335', // Red - major mental gear change
+  'default': '#9e9e9e'         // Gray - uncertain/default
 };
 
-// Color palette for dynamic clusters
-const CLUSTER_COLORS = [
-  '#ff6b6b', '#4ecdc4', '#45b7d1', '#96ceb4', '#ffeaa7', 
-  '#dda0dd', '#ff9ff3', '#54a0ff', '#5f27cd', '#00d2d3',
-  '#ff9f43', '#10ac84', '#ee5a24', '#0984e3', '#6c5ce7',
-  '#a29bfe', '#fd79a8', '#e17055', '#00b894', '#fdcb6e'
-];
+// All nodes will be colored gray since we focus on transitions, not topics
+const NODE_COLORS = {
+  default: '#9e9e9e'
+};
+const DEFAULT_NODE_COLOR = NODE_COLORS.default;
+
+// Transition analysis thresholds
+const TRANSITION_THRESHOLDS = {
+  TIME_RELATED: 5 * 60 * 1000,      // 5 minutes - related if within this time
+  TIME_TOPIC_SHIFT: 30 * 60 * 1000, // 30 minutes - topic shift if within this time
+  SEMANTIC_RELATED: 0.4,             // Word overlap threshold for related content
+  SEMANTIC_TOPIC_SHIFT: 0.1          // Word overlap threshold for topic shift
+};
 
 class HistoryGraphVisualizer {
   constructor() {
@@ -61,7 +35,7 @@ class HistoryGraphVisualizer {
     this.links = [];
     this.simulation = null;
     this.zoom = null;
-    this.clusters = new Map();
+    this.transitions = new Map(); // Store transition analysis results
     
     this.init();
   }
@@ -80,8 +54,14 @@ class HistoryGraphVisualizer {
   setupSVG() {
     const container = document.getElementById('graph-container');
     const rect = container.getBoundingClientRect();
-    this.width = rect.width;
-    this.height = rect.height;
+    this.width = rect.width || 1000;  // Fallback width
+    this.height = rect.height || 650; // Fallback height
+    
+    // Validate dimensions
+    if (isNaN(this.width) || this.width <= 0) this.width = 1000;
+    if (isNaN(this.height) || this.height <= 0) this.height = 650;
+    
+    console.log(`SVG dimensions: ${this.width}x${this.height}`);
 
     this.svg = d3.select('#graph')
       .attr('width', this.width)
@@ -98,9 +78,21 @@ class HistoryGraphVisualizer {
         return -event.deltaY * (event.deltaMode === 1 ? 0.05 : event.deltaMode ? 1 : 0.002);
       })
       .on('zoom', (event) => {
-        this.g.attr('transform', event.transform);
+        // Validate transform values to prevent NaN
+        const transform = event.transform;
+        if (isNaN(transform.x) || isNaN(transform.y) || isNaN(transform.k) || transform.k <= 0) {
+          console.warn('Invalid transform detected, resetting:', transform);
+          // Reset to identity transform
+          const identity = d3.zoomIdentity;
+          this.svg.call(this.zoom.transform, identity);
+          this.g.attr('transform', identity);
+          this.updateZoomDisplay(1);
+          return;
+        }
+        
+        this.g.attr('transform', transform);
         // Update zoom level display
-        this.updateZoomDisplay(event.transform.k);
+        this.updateZoomDisplay(transform.k);
       });
 
     this.svg.call(this.zoom);
@@ -117,6 +109,11 @@ class HistoryGraphVisualizer {
   setupEventListeners() {
     document.getElementById('refresh-btn').addEventListener('click', () => {
       this.loadAndVisualize();
+    });
+    
+    document.getElementById('test-btn').addEventListener('click', () => {
+      console.log('Loading test data...');
+      this.loadTestData();
     });
   }
 
@@ -201,6 +198,12 @@ class HistoryGraphVisualizer {
   updateZoomDisplay(scale) {
     const zoomDisplay = document.getElementById('zoom-display');
     if (zoomDisplay) {
+      // Validate scale value
+      if (isNaN(scale) || !isFinite(scale) || scale <= 0) {
+        console.warn('Invalid scale for zoom display:', scale);
+        scale = 1; // Default to 100%
+      }
+      
       const percentage = Math.round(scale * 100);
       zoomDisplay.textContent = `${percentage}%`;
       
@@ -237,8 +240,8 @@ class HistoryGraphVisualizer {
       let processedData;
       try {
         processedData = await this.processHistoryData(historyItems);
-      } catch (clusteringError) {
-        console.warn('Enhanced clustering failed, using fallback:', clusteringError);
+      } catch (transitionError) {
+        console.warn('Transition analysis failed, using fallback:', transitionError);
         document.getElementById('loading').textContent = 'Using basic grouping...';
         processedData = await this.processHistoryDataFallback(historyItems);
       }
@@ -271,8 +274,8 @@ class HistoryGraphVisualizer {
 
         chrome.history.search({
           text: '',
-          maxResults: 500,
-          startTime: Date.now() - (30 * 24 * 60 * 60 * 1000) // Last 30 days
+          maxResults: 2000, // Increased from 500
+          startTime: Date.now() - (7 * 24 * 60 * 60 * 1000) // Last 7 days for more recent transitions
         }, (results) => {
           clearTimeout(timeout);
           
@@ -280,6 +283,7 @@ class HistoryGraphVisualizer {
             reject(new Error(chrome.runtime.lastError.message || 'History API error'));
           } else {
             console.log(`Found ${results ? results.length : 0} history items`);
+            console.log('Sample items:', results?.slice(0, 5));
             resolve(results || []);
           }
         });
@@ -294,58 +298,27 @@ class HistoryGraphVisualizer {
       const domainData = new Map();
       const connections = new Map();
       
-      console.log(`Starting to process ${historyItems.length} history items`);
+      console.log(`Starting cognitive transition analysis for ${historyItems.length} history items`);
       
-      // Perform enhanced clustering with timeout
-      const clusteringPromise = this.performEnhancedClustering(historyItems);
-      const timeoutPromise = new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('Clustering timeout')), 10000)
-      );
+      document.getElementById('loading').textContent = 'Analyzing cognitive transitions...';
       
-      const { clusters } = await Promise.race([clusteringPromise, timeoutPromise]);
+      // Sort history items chronologically
+      const sortedHistory = historyItems
+        .filter(item => !FILTERED_DOMAINS.some(d => this.extractDomain(item.url).includes(d)))
+        .sort((a, b) => a.lastVisitTime - b.lastVisitTime);
       
-      // Create cluster color mapping
-      const clusterColors = new Map();
-      const clusterKeys = Array.from(clusters.keys());
-      clusterKeys.forEach((clusterId, index) => {
-        clusterColors.set(clusterId, CLUSTER_COLORS[index % CLUSTER_COLORS.length]);
-      });
+      console.log(`Analyzing transitions between ${sortedHistory.length} history entries`);
       
-      document.getElementById('loading').textContent = 'Building domain graph...';
-      console.log(`Building domain graph with ${clusterKeys.length} clusters`);
-      
-      // Group by domain and assign cluster information
-      let processedItems = 0;
-      for (const item of historyItems) {
+      // Build domain data (all nodes will be gray)
+      for (const item of sortedHistory) {
         const domain = this.extractDomain(item.url);
-        
-        // Skip filtered domains
-        if (FILTERED_DOMAINS.some(d => domain.includes(d))) {
-          continue;
-        }
-        
-        // Find which cluster this item belongs to
-        let itemCluster = 'misc';
-        let itemColor = CLUSTER_COLORS[CLUSTER_COLORS.length - 1];
-        
-        for (const [clusterId, cluster] of clusters) {
-          if (cluster.items.some(clusterItem => {
-            const clusterUrl = clusterItem.url || clusterItem.item?.url;
-            return clusterUrl === item.url;
-          })) {
-            itemCluster = clusterId;
-            itemColor = clusterColors.get(clusterId);
-            break;
-          }
-        }
         
         if (!domainData.has(domain)) {
           domainData.set(domain, {
             domain,
             title: item.title,
             visitCount: 0,
-            cluster: itemCluster,
-            color: itemColor,
+            color: DEFAULT_NODE_COLOR, // All nodes are gray
             lastVisit: item.lastVisitTime,
             urls: new Set()
           });
@@ -355,64 +328,55 @@ class HistoryGraphVisualizer {
         data.visitCount++;
         data.urls.add(item.url);
         data.lastVisit = Math.max(data.lastVisit, item.lastVisitTime);
-        
-        // Update cluster assignment
-        if (itemCluster !== 'misc') {
-          data.cluster = itemCluster;
-          data.color = itemColor;
-        }
-        
-        processedItems++;
-        
-        // Update progress occasionally
-        if (processedItems % 50 === 0) {
-          document.getElementById('loading').textContent = `Building graph... ${processedItems}/${historyItems.length}`;
-          // Allow UI to update
-          await new Promise(resolve => setTimeout(resolve, 1));
-        }
       }
 
-      document.getElementById('loading').textContent = 'Creating connections...';
+      document.getElementById('loading').textContent = 'Analyzing attention flow patterns...';
       
-      // Find connections between domains (visited within 1 hour)
-      const sortedHistory = historyItems
-        .filter(item => !FILTERED_DOMAINS.some(d => this.extractDomain(item.url).includes(d)))
-        .sort((a, b) => a.lastVisitTime - b.lastVisitTime);
-      
+      // Analyze transitions between consecutive visits
       for (let i = 0; i < sortedHistory.length - 1; i++) {
         const current = sortedHistory[i];
         const next = sortedHistory[i + 1];
         
-        const timeDiff = next.lastVisitTime - current.lastVisitTime;
-        const oneHour = 60 * 60 * 1000;
+        const currentDomain = this.extractDomain(current.url);
+        const nextDomain = this.extractDomain(next.url);
         
-        if (timeDiff <= oneHour) {
-          const sourceDomain = this.extractDomain(current.url);
-          const targetDomain = this.extractDomain(next.url);
+        // Skip self-transitions
+        if (currentDomain === nextDomain) continue;
+        
+        // Calculate transition type
+        const transitionType = this.analyzeTransition(current, next);
+        
+        const connectionKey = `${currentDomain}-${nextDomain}`;
+        
+        if (!connections.has(connectionKey)) {
+          const connection = {
+            source: currentDomain,
+            target: nextDomain,
+            weight: 1,
+            transitionType: transitionType,
+            color: TRANSITION_COLORS[transitionType] || TRANSITION_COLORS.default
+          };
+          connections.set(connectionKey, connection);
           
-          if (sourceDomain !== targetDomain) {
-            const key = `${sourceDomain}-${targetDomain}`;
-            const reverseKey = `${targetDomain}-${sourceDomain}`;
-            
-            if (!connections.has(key) && !connections.has(reverseKey)) {
-              connections.set(key, {
-                source: sourceDomain,
-                target: targetDomain,
-                weight: 1
-              });
-            } else if (connections.has(key)) {
-              connections.get(key).weight++;
-            } else if (connections.has(reverseKey)) {
-              connections.get(reverseKey).weight++;
-            }
+          // Debug first few connections
+          if (connections.size <= 10) {
+            console.log(`Connection ${connections.size}:`, currentDomain, '->', nextDomain, 'Type:', transitionType, 'Color:', connection.color);
           }
+        } else {
+          connections.get(connectionKey).weight++;
+        }
+        
+        // Update progress occasionally
+        if (i % 50 === 0) {
+          document.getElementById('loading').textContent = `Analyzing transitions... ${i}/${sortedHistory.length}`;
+          await new Promise(resolve => setTimeout(resolve, 1));
         }
       }
 
-      // Store clusters for legend generation
-      this.clusters = clusters;
+      // Store transitions for legend generation
+      this.transitions = this.calculateTransitionStats(connections);
       
-      console.log(`Completed processing: ${domainData.size} domains, ${connections.size} connections`);
+      console.log(`Completed transition analysis: ${domainData.size} domains, ${connections.size} transitions`);
 
       return {
         nodes: Array.from(domainData.values()),
@@ -425,12 +389,78 @@ class HistoryGraphVisualizer {
     }
   }
 
+  // Analyze the cognitive transition between two consecutive history items
+  analyzeTransition(currentItem, nextItem) {
+    const timeDiff = nextItem.lastVisitTime - currentItem.lastVisitTime;
+    const semanticSimilarity = this.calculateSemanticSimilarity(currentItem, nextItem);
+    
+    let transitionType;
+    
+    // Quick transitions with similar content = related
+    if (timeDiff <= TRANSITION_THRESHOLDS.TIME_RELATED && semanticSimilarity >= TRANSITION_THRESHOLDS.SEMANTIC_RELATED) {
+      transitionType = 'related';
+    }
+    // Medium time gaps or some semantic overlap = topic shift
+    else if (timeDiff <= TRANSITION_THRESHOLDS.TIME_TOPIC_SHIFT || semanticSimilarity >= TRANSITION_THRESHOLDS.SEMANTIC_TOPIC_SHIFT) {
+      transitionType = 'topic_shift';
+    }
+    // Long gaps or no semantic connection = context switch
+    else {
+      transitionType = 'context_switch';
+    }
+    
+    // Debug first few transitions
+    if (Math.random() < 0.1) { // Log 10% of transitions
+      console.log('Transition analysis:', {
+        from: this.extractDomain(currentItem.url),
+        to: this.extractDomain(nextItem.url),
+        timeDiff: `${Math.round(timeDiff / 1000)}s`,
+        semantic: semanticSimilarity.toFixed(3),
+        type: transitionType
+      });
+    }
+    
+    return transitionType;
+  }
+
+  // Calculate semantic similarity between two history items using word overlap
+  calculateSemanticSimilarity(item1, item2) {
+    const text1 = `${item1.title || ''} ${this.extractDomain(item1.url)}`.toLowerCase();
+    const text2 = `${item2.title || ''} ${this.extractDomain(item2.url)}`.toLowerCase();
+    
+    const words1 = new Set(text1.match(/\b\w+\b/g) || []);
+    const words2 = new Set(text2.match(/\b\w+\b/g) || []);
+    
+    const intersection = new Set([...words1].filter(x => words2.has(x)));
+    const union = new Set([...words1, ...words2]);
+    
+    return intersection.size / union.size; // Jaccard similarity
+  }
+
+  // Calculate statistics about transitions for the legend
+  calculateTransitionStats(connections) {
+    const stats = {
+      related: 0,
+      topic_shift: 0,
+      context_switch: 0,
+      total: connections.size
+    };
+    
+    for (const connection of connections.values()) {
+      if (connection.transitionType in stats) {
+        stats[connection.transitionType]++;
+      }
+    }
+    
+    return stats;
+  }
+
   async processHistoryDataFallback(historyItems) {
-    console.log('Using fallback processing without clustering');
+    console.log('Using fallback processing with simple transition analysis');
     const domainData = new Map();
     const connections = new Map();
     
-    // Simple processing without clustering
+    // Simple processing - create nodes for each domain
     historyItems.forEach(item => {
       const domain = this.extractDomain(item.url);
       
@@ -444,8 +474,7 @@ class HistoryGraphVisualizer {
           domain,
           title: item.title,
           visitCount: 0,
-          cluster: 'misc',
-          color: CLUSTER_COLORS[CLUSTER_COLORS.length - 1], // Default color
+          color: NODE_COLORS.default, // All nodes gray for transition focus
           lastVisit: item.lastVisitTime,
           urls: new Set()
         });
@@ -457,7 +486,7 @@ class HistoryGraphVisualizer {
       data.lastVisit = Math.max(data.lastVisit, item.lastVisitTime);
     });
 
-    // Find connections between domains
+    // Simple fallback transition analysis - just use time-based connections
     const sortedHistory = historyItems
       .filter(item => !FILTERED_DOMAINS.some(d => this.extractDomain(item.url).includes(d)))
       .sort((a, b) => a.lastVisitTime - b.lastVisitTime);
@@ -467,9 +496,9 @@ class HistoryGraphVisualizer {
       const next = sortedHistory[i + 1];
       
       const timeDiff = next.lastVisitTime - current.lastVisitTime;
-      const oneHour = 60 * 60 * 1000;
       
-      if (timeDiff <= oneHour) {
+      // Use simplified transition logic for fallback
+      if (timeDiff <= TRANSITION_THRESHOLDS.TIME_TOPIC_SHIFT) {
         const sourceDomain = this.extractDomain(current.url);
         const targetDomain = this.extractDomain(next.url);
         
@@ -477,11 +506,19 @@ class HistoryGraphVisualizer {
           const key = `${sourceDomain}-${targetDomain}`;
           const reverseKey = `${targetDomain}-${sourceDomain}`;
           
+          // Simple transition type based on time only
+          let transitionType = 'related';
+          if (timeDiff > TRANSITION_THRESHOLDS.TIME_RELATED) {
+            transitionType = 'topic_shift';
+          }
+          
           if (!connections.has(key) && !connections.has(reverseKey)) {
             connections.set(key, {
               source: sourceDomain,
               target: targetDomain,
-              weight: 1
+              weight: 1,
+              transitionType: transitionType,
+              color: TRANSITION_COLORS[transitionType]
             });
           } else if (connections.has(key)) {
             connections.get(key).weight++;
@@ -492,13 +529,25 @@ class HistoryGraphVisualizer {
       }
     }
 
-    // Set up basic clusters for legend
+    // Set up transition-based clusters for legend
     this.clusters = new Map([
-      ['misc', {
-        name: 'All Domains',
-        color: CLUSTER_COLORS[CLUSTER_COLORS.length - 1],
-        items: Array.from(domainData.values()),
-        representative: 'All Domains'
+      ['related', {
+        name: 'Related Transitions',
+        color: TRANSITION_COLORS.related,
+        items: [],
+        representative: 'Quick attention flow'
+      }],
+      ['topic_shift', {
+        name: 'Topic Shifts', 
+        color: TRANSITION_COLORS.topic_shift,
+        items: [],
+        representative: 'Moderate cognitive jumps'
+      }],
+      ['context_switch', {
+        name: 'Context Switches',
+        color: TRANSITION_COLORS.context_switch,
+        items: [],
+        representative: 'Major cognitive shifts'
       }]
     ]);
 
@@ -626,76 +675,7 @@ class HistoryGraphVisualizer {
     return bestScore > 0.5 ? bestTopic : 'misc';
   }
 
-  // Perform enhanced clustering (simplified and more robust)
-  async performEnhancedClustering(historyItems) {
-    try {
-      document.getElementById('loading').textContent = 'Analyzing content...';
-      
-      // Filter out search engines and prepare semantic data
-      const filteredItems = historyItems.filter(item => {
-        const domain = this.extractDomain(item.url);
-        return !FILTERED_DOMAINS.some(filteredDomain => domain.includes(filteredDomain));
-      });
-      
-      if (filteredItems.length === 0) {
-        return { clusters: new Map() };
-      }
-      
-      console.log(`Processing ${filteredItems.length} filtered items`);
-      
-      // Group by enhanced topic
-      const topicGroups = new Map();
-      
-      for (const item of filteredItems) {
-        const semantic = this.createSemanticInput(item.url, item.title);
-        const topic = this.classifyEnhancedTopic(semantic);
-        
-        if (!topicGroups.has(topic)) {
-          topicGroups.set(topic, []);
-        }
-        topicGroups.get(topic).push({ ...item, semantic });
-      }
-      
-      document.getElementById('loading').textContent = 'Creating clusters...';
-      
-      const clusters = new Map();
-      let clusterIndex = 0;
-      
-      // Create simple clusters from topic groups
-      for (const [topic, items] of topicGroups) {
-        const clusterId = `${topic}_${clusterIndex++}`;
-        clusters.set(clusterId, {
-          id: clusterId,
-          topic,
-          items,
-          representative: this.generateSimpleClusterName(topic, items)
-        });
-      }
-      
-      console.log(`Created ${clusters.size} clusters`);
-      return { clusters };
-      
-    } catch (error) {
-      console.error('Error in clustering:', error);
-      // Return empty clusters on error to prevent hanging
-      return { clusters: new Map() };
-    }
-  }
 
-  // Simplified cluster name generation
-  generateSimpleClusterName(topic, items) {
-    const topicNames = {
-      'programming': 'Programming & Development',
-      'social': 'Social Media',
-      'ecommerce': 'Online Shopping',
-      'news': 'News & Articles',
-      'entertainment': 'Entertainment',
-      'education': 'Learning & Education',
-      'misc': 'Miscellaneous'
-    };
-    
-    return topicNames[topic] || 'Other Content';
-  }
 
   // Test mode with sample data for debugging
   loadTestData() {
@@ -715,40 +695,93 @@ class HistoryGraphVisualizer {
     ];
     
     try {
-      // Create simple test clusters without semantic analysis
+      // Create test transition clusters for legend
       this.clusters = new Map([
-        ['programming', { id: 'programming', items: [], representative: 'Programming Development' }],
-        ['social', { id: 'social', items: [], representative: 'Social Media' }],
-        ['shopping', { id: 'shopping', items: [], representative: 'Online Shopping' }],
-        ['entertainment', { id: 'entertainment', items: [], representative: 'Entertainment Streaming' }],
-        ['news', { id: 'news', items: [], representative: 'News Media' }]
+        ['related', {
+          name: 'Related Transitions',
+          color: TRANSITION_COLORS.related,
+          items: [],
+          representative: 'Quick attention flow'
+        }],
+        ['topic_shift', {
+          name: 'Topic Shifts',
+          color: TRANSITION_COLORS.topic_shift,
+          items: [],
+          representative: 'Moderate cognitive jumps'
+        }],
+        ['context_switch', {
+          name: 'Context Switches',
+          color: TRANSITION_COLORS.context_switch,
+          items: [],
+          representative: 'Major cognitive shifts'
+        }]
       ]);
       
-      // Create test nodes with cluster assignments
+      // Create test nodes for transition analysis
       const testNodes = sampleHistory.map((item, index) => {
         const domain = this.extractDomain(item.url);
-        let cluster = 'misc';
-        
-        if (domain.includes('github') || domain.includes('stackoverflow')) cluster = 'programming';
-        else if (domain.includes('facebook') || domain.includes('twitter') || domain.includes('youtube')) cluster = 'social';
-        else if (domain.includes('amazon')) cluster = 'shopping';
-        else if (domain.includes('netflix')) cluster = 'entertainment';
-        else if (domain.includes('bbc')) cluster = 'news';
         
         return {
           domain,
           title: item.title,
           visitCount: item.visitCount || 1,
-          cluster,
-          color: CLUSTER_COLORS[index % CLUSTER_COLORS.length],
+          color: NODE_COLORS.default, // All nodes gray for transition focus
           lastVisit: item.lastVisitTime,
           urls: new Set([item.url])
         };
       });
       
+      // Create some sample transitions for testing - make them more visible
+      const testLinks = [
+        {
+          source: 'github.com',
+          target: 'stackoverflow.com',
+          weight: 5,
+          transitionType: 'related',
+          color: TRANSITION_COLORS.related
+        },
+        {
+          source: 'stackoverflow.com', 
+          target: 'facebook.com',
+          weight: 3,
+          transitionType: 'topic_shift',
+          color: TRANSITION_COLORS.topic_shift
+        },
+        {
+          source: 'facebook.com',
+          target: 'amazon.com',
+          weight: 2,
+          transitionType: 'context_switch',
+          color: TRANSITION_COLORS.context_switch
+        },
+        {
+          source: 'amazon.com',
+          target: 'netflix.com',
+          weight: 4,
+          transitionType: 'related',
+          color: TRANSITION_COLORS.related
+        },
+        {
+          source: 'netflix.com',
+          target: 'news.bbc.co.uk',
+          weight: 2,
+          transitionType: 'topic_shift',
+          color: TRANSITION_COLORS.topic_shift
+        },
+        {
+          source: 'youtube.com',
+          target: 'github.com',
+          weight: 1,
+          transitionType: 'context_switch',
+          color: TRANSITION_COLORS.context_switch
+        }
+      ];
+      
+      console.log('Test links with colors:', testLinks);
+      
       const testData = {
         nodes: testNodes,
-        links: [] // No connections for test data
+        links: testLinks
       };
       
       this.createVisualization(testData);
@@ -763,8 +796,21 @@ class HistoryGraphVisualizer {
     // Clear existing visualization
     this.g.selectAll('*').remove();
     
-    this.nodes = data.nodes;
-    this.links = data.links;
+    // Validate data
+    if (!data.nodes || data.nodes.length === 0) {
+      console.warn('No nodes to visualize');
+      document.getElementById('loading').style.display = 'none';
+      return;
+    }
+    
+    this.nodes = data.nodes.map(node => ({
+      ...node,
+      x: node.x || this.width / 2 + (Math.random() - 0.5) * 100,
+      y: node.y || this.height / 2 + (Math.random() - 0.5) * 100
+    }));
+    this.links = data.links || [];
+    
+    console.log(`Visualizing ${this.nodes.length} nodes and ${this.links.length} links`);
     
     // Create force simulation
     this.simulation = d3.forceSimulation(this.nodes)
@@ -773,16 +819,22 @@ class HistoryGraphVisualizer {
       .force('center', d3.forceCenter(this.width / 2, this.height / 2))
       .force('collision', d3.forceCollide().radius(d => this.getNodeRadius(d) + 8));
 
-    // Create links
+    // Create links with transition-based coloring
     const link = this.g.append('g')
       .selectAll('line')
       .data(this.links)
       .enter()
       .append('line')
       .attr('class', 'link')
-      .attr('stroke-width', d => Math.sqrt(d.weight));
+      .attr('stroke', d => {
+        const color = d.color || TRANSITION_COLORS.default;
+        console.log('Setting link stroke color:', color, 'for transition type:', d.transitionType);
+        return color;
+      })
+      .attr('stroke-width', d => Math.max(4, Math.sqrt(d.weight) + 3)) // Thick lines for visibility
+      .attr('stroke-opacity', 1.0); // Fully opaque
 
-    // Create nodes
+    // Create nodes (all gray since we focus on transitions)
     const node = this.g.append('g')
       .selectAll('circle')
       .data(this.nodes)
@@ -790,7 +842,9 @@ class HistoryGraphVisualizer {
       .append('circle')
       .attr('class', 'node')
       .attr('r', d => this.getNodeRadius(d))
-      .attr('fill', d => d.color) // Use cluster-based color
+      .attr('fill', DEFAULT_NODE_COLOR) // All nodes are gray
+      .attr('stroke', '#fff')
+      .attr('stroke-width', 2)
       .call(d3.drag()
         .on('start', (event, d) => this.dragStarted(event, d))
         .on('drag', (event, d) => this.dragged(event, d))
@@ -817,8 +871,8 @@ class HistoryGraphVisualizer {
           .html(`
             <strong>${d.domain}</strong><br/>
             Visits: ${d.visitCount}<br/>
-            Cluster: ${this.getClusterName(d.cluster)}<br/>
-            Last visit: ${new Date(d.lastVisit).toLocaleDateString()}
+            Last visit: ${new Date(d.lastVisit).toLocaleDateString()}<br/>
+            <em>Connections show attention flow patterns</em>
           `);
       })
       .on('mouseout', () => {
@@ -828,27 +882,27 @@ class HistoryGraphVisualizer {
     // Update positions on simulation tick
     this.simulation.on('tick', () => {
       link
-        .attr('x1', d => d.source.x)
-        .attr('y1', d => d.source.y)
-        .attr('x2', d => d.target.x)
-        .attr('y2', d => d.target.y);
+        .attr('x1', d => isNaN(d.source.x) ? 0 : d.source.x)
+        .attr('y1', d => isNaN(d.source.y) ? 0 : d.source.y)
+        .attr('x2', d => isNaN(d.target.x) ? 0 : d.target.x)
+        .attr('y2', d => isNaN(d.target.y) ? 0 : d.target.y);
 
       node
-        .attr('cx', d => d.x)
-        .attr('cy', d => d.y);
+        .attr('cx', d => isNaN(d.x) ? this.width / 2 : d.x)
+        .attr('cy', d => isNaN(d.y) ? this.height / 2 : d.y);
 
       label
-        .attr('x', d => d.x)
-        .attr('y', d => d.y + 4);
+        .attr('x', d => isNaN(d.x) ? this.width / 2 : d.x)
+        .attr('y', d => isNaN(d.y) ? this.height / 2 : d.y + 4);
     });
 
     // Initialize zoom display
     this.updateZoomDisplay(1);
     
-    // Auto-fit the graph after simulation settles
-    setTimeout(() => {
-      this.fitGraphToViewport();
-    }, 2000);
+    // Auto-fit the graph after simulation settles - disabled temporarily to prevent NaN errors
+    // setTimeout(() => {
+    //   this.fitGraphToViewport();
+    // }, 2000);
     
     // Update legend with dynamic clusters
     this.updateLegend();
@@ -862,9 +916,26 @@ class HistoryGraphVisualizer {
   fitGraphToViewport() {
     if (this.nodes.length === 0) return;
 
-    // Get the bounds of all nodes
-    const xExtent = d3.extent(this.nodes, d => d.x);
-    const yExtent = d3.extent(this.nodes, d => d.y);
+    // Filter out nodes with invalid positions
+    const validNodes = this.nodes.filter(d => 
+      !isNaN(d.x) && !isNaN(d.y) && isFinite(d.x) && isFinite(d.y)
+    );
+    
+    if (validNodes.length === 0) {
+      console.warn('No valid node positions for viewport fitting');
+      return;
+    }
+
+    // Get the bounds of all valid nodes
+    const xExtent = d3.extent(validNodes, d => d.x);
+    const yExtent = d3.extent(validNodes, d => d.y);
+    
+    // Validate extents
+    if (!xExtent[0] || !xExtent[1] || !yExtent[0] || !yExtent[1] ||
+        isNaN(xExtent[0]) || isNaN(xExtent[1]) || isNaN(yExtent[0]) || isNaN(yExtent[1])) {
+      console.warn('Invalid node extents, skipping viewport fit');
+      return;
+    }
     
     // Add some padding
     const padding = 50;
@@ -875,6 +946,12 @@ class HistoryGraphVisualizer {
       height: (yExtent[1] - yExtent[0]) + (2 * padding)
     };
 
+    // Validate bounds
+    if (bounds.width <= 0 || bounds.height <= 0) {
+      console.warn('Invalid bounds for viewport fitting');
+      return;
+    }
+
     // Calculate scale to fit
     const scale = Math.min(
       this.width / bounds.width,
@@ -882,34 +959,30 @@ class HistoryGraphVisualizer {
       1.5 // Don't zoom in too much
     );
 
+    // Validate scale
+    if (isNaN(scale) || scale <= 0 || !isFinite(scale)) {
+      console.warn('Invalid scale calculated, using default');
+      return;
+    }
+
     // Calculate translation to center
     const translate = [
       (this.width / 2) - (bounds.x + bounds.width / 2) * scale,
       (this.height / 2) - (bounds.y + bounds.height / 2) * scale
     ];
 
+    // Validate translation
+    if (isNaN(translate[0]) || isNaN(translate[1]) || !isFinite(translate[0]) || !isFinite(translate[1])) {
+      console.warn('Invalid translation calculated, using default');
+      return;
+    }
+
     // Apply the transform
     const transform = d3.zoomIdentity.translate(translate[0], translate[1]).scale(scale);
     this.svg.transition().duration(1000).call(this.zoom.transform, transform);
   }
 
-  getClusterName(clusterId) {
-    if (clusterId === 'misc') return 'Miscellaneous';
-    
-    const cluster = this.clusters.get(clusterId);
-    if (!cluster) return 'Unknown';
-    
-    // Use the cluster name if available
-    if (cluster.name) return cluster.name;
-    
-    // Create a readable name from the representative text
-    if (cluster.representative) {
-      const words = cluster.representative.split(' ').filter(word => word.length > 2);
-      return words.slice(0, 3).join(' ').replace(/\b\w/g, l => l.toUpperCase()) || 'Cluster';
-    }
-    
-    return 'Cluster';
-  }
+
 
   updateLegend() {
     // Remove old legend
@@ -918,50 +991,51 @@ class HistoryGraphVisualizer {
       oldLegend.remove();
     }
     
-    // Create new dynamic legend based on clusters
+    // Create new legend based on transition types
     const legend = document.createElement('div');
     legend.className = 'legend';
     
-    // Get all clusters except 'misc' first, then add 'misc' at the end
-    const clusterEntries = Array.from(this.clusters.entries());
-    const nonMiscClusters = clusterEntries.filter(([id]) => id !== 'misc');
-    const miscCluster = clusterEntries.find(([id]) => id === 'misc');
+    // Add transition type legend items
+    const transitionTypes = [
+      { 
+        type: 'related', 
+        label: 'Related Flow', 
+        description: 'Quick transitions between similar content (staying focused)' 
+      },
+      { 
+        type: 'topic_shift', 
+        label: 'Topic Shift', 
+        description: 'Moderate cognitive jumps to related areas' 
+      },
+      { 
+        type: 'context_switch', 
+        label: 'Context Switch', 
+        description: 'Major mental gear changes to different topics' 
+      }
+    ];
     
-    // Add non-misc clusters first
-    nonMiscClusters.forEach(([clusterId, cluster], index) => {
+    transitionTypes.forEach(({ type, label, description }) => {
       const legendItem = document.createElement('div');
       legendItem.className = 'legend-item';
       
       const colorDiv = document.createElement('div');
-      // Use the cluster's stored color if available, otherwise use index-based color
-      const clusterColor = cluster.color || CLUSTER_COLORS[index % CLUSTER_COLORS.length];
-      colorDiv.style.cssText = `width: 8px; height: 8px; border-radius: 50%; background-color: ${clusterColor};`;
+      colorDiv.style.cssText = `width: 10px; height: 10px; border-radius: 50%; background-color: ${TRANSITION_COLORS[type]};`;
       
       const labelSpan = document.createElement('span');
-      labelSpan.textContent = this.getClusterName(clusterId);
-      labelSpan.title = `${cluster.items.length} items`;
+      labelSpan.textContent = label;
+      labelSpan.title = description;
+      
+      // Add count if transitions data is available
+      if (this.transitions && this.transitions[type] !== undefined) {
+        const count = this.transitions[type];
+        const percentage = this.transitions.total > 0 ? Math.round((count / this.transitions.total) * 100) : 0;
+        labelSpan.textContent += ` (${count} - ${percentage}%)`;
+      }
       
       legendItem.appendChild(colorDiv);
       legendItem.appendChild(labelSpan);
       legend.appendChild(legendItem);
     });
-    
-    // Add miscellaneous last if it exists
-    if (miscCluster) {
-      const legendItem = document.createElement('div');
-      legendItem.className = 'legend-item';
-      
-      const colorDiv = document.createElement('div');
-      colorDiv.style.cssText = `width: 8px; height: 8px; border-radius: 50%; background-color: ${CLUSTER_COLORS[CLUSTER_COLORS.length - 1]};`;
-      
-      const labelSpan = document.createElement('span');
-      labelSpan.textContent = 'Miscellaneous';
-      labelSpan.title = `${miscCluster[1].items.length} items`;
-      
-      legendItem.appendChild(colorDiv);
-      legendItem.appendChild(labelSpan);
-      legend.appendChild(legendItem);
-    }
     
     // Insert the new legend
     const header = document.querySelector('header');
@@ -990,8 +1064,15 @@ class HistoryGraphVisualizer {
 document.addEventListener('DOMContentLoaded', () => {
   // Check if we're in a Chrome extension context
   if (typeof chrome === 'undefined' || !chrome.history) {
-    document.getElementById('loading').textContent = 'Not running in Chrome extension context. Load as unpacked extension.';
-    document.getElementById('loading').style.color = '#d93025';
+    console.log('Not in Chrome extension context, loading test data');
+    try {
+      const visualizer = new HistoryGraphVisualizer();
+      visualizer.loadTestData();
+    } catch (error) {
+      console.error('Failed to initialize test visualizer:', error);
+      document.getElementById('loading').textContent = `Test error: ${error.message}`;
+      document.getElementById('loading').style.color = '#d93025';
+    }
     return;
   }
   

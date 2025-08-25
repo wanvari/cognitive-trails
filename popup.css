@@ -164,11 +164,7 @@ header h1 {
   stroke-width: 3px;
 }
 
-.link {
-  stroke: #999;
-  stroke-opacity: 0.3;
-  stroke-width: 1px;
-}
+/* Link styles are now set dynamically in JavaScript based on transition type */
 
 .node-label {
   font-size: 11px;
