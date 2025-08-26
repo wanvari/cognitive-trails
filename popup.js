@@ -36,6 +36,13 @@ class HistoryGraphVisualizer {
     this.simulation = null;
     this.zoom = null;
     this.transitions = new Map(); // Store transition analysis results
+  // Cognitive analysis state
+  this.temporalAnalysis = null;
+  this.complexityByHour = new Array(24).fill().map(() => ({ total: 0, count: 0 }));
+  this.chains = [];
+  this.focusSessions = [];
+  this.graphMetrics = null;
+  this.insights = null;
     
     this.init();
   }
@@ -109,11 +116,6 @@ class HistoryGraphVisualizer {
   setupEventListeners() {
     document.getElementById('refresh-btn').addEventListener('click', () => {
       this.loadAndVisualize();
-    });
-    
-    document.getElementById('test-btn').addEventListener('click', () => {
-      console.log('Loading test data...');
-      this.loadTestData();
     });
   }
 
@@ -297,6 +299,8 @@ class HistoryGraphVisualizer {
     try {
       const domainData = new Map();
       const connections = new Map();
+  // Collect visit events (sorted later) for cognitive analyses
+  const visitEvents = [];
       
       console.log(`Starting cognitive transition analysis for ${historyItems.length} history items`);
       
@@ -328,6 +332,12 @@ class HistoryGraphVisualizer {
         data.visitCount++;
         data.urls.add(item.url);
         data.lastVisit = Math.max(data.lastVisit, item.lastVisitTime);
+        visitEvents.push({
+          domain,
+          url: item.url,
+            title: item.title || '',
+          time: item.lastVisitTime
+        });
       }
 
       document.getElementById('loading').textContent = 'Analyzing attention flow patterns...';
@@ -375,6 +385,14 @@ class HistoryGraphVisualizer {
 
       // Store transitions for legend generation
       this.transitions = this.calculateTransitionStats(connections);
+
+  // Run cognitive analyses
+  this.temporalAnalysis = this.analyzeTemporalPatterns(visitEvents);
+  this.detectInformationChains(visitEvents);
+  this.analyzeFocusSessions(visitEvents);
+  this.graphMetrics = this.calculateGraphMetrics(Array.from(domainData.values()), Array.from(connections.values()));
+  this.insights = this.generateInsights();
+  // Cognitive panels moved to dedicated dashboard (analysis.html)
       
       console.log(`Completed transition analysis: ${domainData.size} domains, ${connections.size} transitions`);
 
@@ -387,6 +405,317 @@ class HistoryGraphVisualizer {
       console.error('Error in processHistoryData:', error);
       throw error;
     }
+  }
+
+  // (1) Temporal Pattern Analysis
+  analyzeTemporalPatterns(visitEvents) {
+    const hourlyActivity = new Array(24).fill(0);
+    const visitsSorted = [...visitEvents].sort((a,b) => a.time - b.time);
+    // For sessions average length
+    let sessions = [];
+    let sessionStart = null;
+    let lastTime = null;
+    const SESSION_GAP = 5 * 60 * 1000;
+    visitsSorted.forEach(v => {
+      const date = new Date(v.time);
+      const h = date.getHours();
+      hourlyActivity[h]++;
+      if (lastTime === null || (v.time - lastTime) > SESSION_GAP) {
+        if (sessionStart !== null) {
+          sessions.push(lastTime - sessionStart);
+        }
+        sessionStart = v.time;
+      }
+      lastTime = v.time;
+    });
+    if (sessionStart !== null && lastTime !== null) sessions.push(lastTime - sessionStart);
+    const avgSessionLength = sessions.length ? sessions.reduce((a,b)=>a+b,0)/sessions.length : 0;
+    // Peak hours > 75th percentile
+    const sortedCounts = [...hourlyActivity].sort((a,b)=>a-b);
+    const threshold = sortedCounts[Math.floor(0.75 * sortedCounts.length)] || 0;
+    const peakHours = hourlyActivity.map((c,i)=>({c,i})).filter(o=>o.c>=threshold && o.c>0).map(o=>o.i);
+    // Ultradian rhythm detection via simple autocorrelation between 60-150 mins window on minute resolution aggregated
+    // Convert to minute series repeating hour counts (rough approx)
+    const minuteSeries = [];
+    // Represent one day (1440) using distribution proportions
+    const total = hourlyActivity.reduce((a,b)=>a+b,0) || 1;
+    for (let h=0; h<24; h++) {
+      const count = hourlyActivity[h];
+      const perMinute = count / 60;
+      for (let m=0; m<60; m++) minuteSeries.push(perMinute);
+    }
+    function autocorr(series, lag){
+      const n = series.length - lag;
+      if (n <= 1) return 0;
+      let mean = series.reduce((a,b)=>a+b,0)/series.length;
+      let num=0, den=0;
+      for (let i=0;i<n;i++){ num += (series[i]-mean)*(series[i+lag]-mean); }
+      for (let i=0;i<series.length;i++){ den += (series[i]-mean)**2; }
+      return den ? num/den : 0;
+    }
+    let bestLag = null, bestR = -Infinity;
+    for (let lag=90; lag<=120; lag+=5){ // test 90-120 minute cycles
+      const r = autocorr(minuteSeries, lag);
+      if (r > bestR) { bestR = r; bestLag = lag; }
+    }
+    return {
+      hourlyActivity,
+      peakHours,
+      rhythmPeriod: bestLag || null,
+      avgSessionMinutes: +(avgSessionLength/60000).toFixed(2)
+    };
+  }
+
+  // (2) Content Complexity Scoring
+  calculateComplexity(domain, title='') {
+    const base = {
+      'github.com': 0.7,'stackoverflow.com':0.8,'arxiv.org':0.9,
+      'wikipedia.org':0.6,'reddit.com':0.4,'youtube.com':0.3
+    };
+    let score = base[domain] ?? 0.5;
+    const lower = title.toLowerCase();
+    const plus = ['documentation','api','tutorial','research'];
+    const minus = ['meme','funny','social'];
+    plus.forEach(k=>{ if(lower.includes(k)) score += 0.1; });
+    minus.forEach(k=>{ if(lower.includes(k)) score -= 0.1; });
+    return Math.min(1, Math.max(0, score));
+  }
+
+  // Helper for semantic similarity (reused for chains/sessions)
+  jaccardSimilarityTokens(a, b) {
+    const ta = (a||'').toLowerCase().match(/\b\w+\b/g) || [];
+    const tb = (b||'').toLowerCase().match(/\b\w+\b/g) || [];
+    const sa = new Set(ta);
+    const sb = new Set(tb);
+    const inter = [...sa].filter(x=>sb.has(x));
+    const union = new Set([...sa, ...sb]);
+    return union.size ? inter.length/union.size : 0;
+  }
+
+  // (3) Information Foraging Chain Detection
+  detectInformationChains(visitEvents) {
+    const events = [...visitEvents].sort((a,b)=>a.time-b.time);
+    const chains = [];
+    let current = [];
+    const MAX_GAP = 5*60*1000;
+    for (let i=0;i<events.length;i++) {
+      const e = events[i];
+      if (!current.length) { current.push(e); continue; }
+      const prev = current[current.length-1];
+      const sim = this.jaccardSimilarityTokens(prev.title+prev.domain, e.title+e.domain);
+      if ( (e.time - prev.time) <= MAX_GAP && sim > 0.3 ) {
+        current.push(e);
+      } else {
+        if (current.length>1) chains.push(this.summarizeChain(current));
+        current = [e];
+      }
+    }
+    if (current.length>1) chains.push(this.summarizeChain(current));
+    this.chains = chains;
+    return chains;
+  }
+
+  summarizeChain(events) {
+    const durationMs = events[events.length-1].time - events[0].time || 1;
+    const complexities = events.map(e=> this.calculateComplexity(e.domain, e.title));
+    const avgComplexity = complexities.reduce((a,b)=>a+b,0)/complexities.length;
+    const chainLength = events.length;
+    const minutes = durationMs/60000 || 1;
+    const scentStrength = +(chainLength / minutes).toFixed(2);
+    return {
+      length: chainLength,
+      durationMinutes: +minutes.toFixed(2),
+      avgComplexity: +avgComplexity.toFixed(2),
+      scentStrength,
+      topic: 'general'
+    };
+  }
+
+  // (4) Focus Session Analysis
+  analyzeFocusSessions(visitEvents) {
+    const events = [...visitEvents].sort((a,b)=>a.time-b.time);
+    const sessions = [];
+    let session = [];
+    const MAX_GAP = 5*60*1000;
+    for (let i=0;i<events.length;i++) {
+      const e = events[i];
+      if (!session.length) { session.push(e); continue; }
+      const prev = session[session.length-1];
+      const sim = this.jaccardSimilarityTokens(prev.title+prev.domain, e.title+e.domain);
+      if ((e.time - prev.time) <= MAX_GAP && (prev.domain===e.domain || sim>0.4)) {
+        session.push(e);
+      } else {
+        sessions.push(this.summarizeSession(session));
+        session = [e];
+      }
+    }
+    if (session.length) sessions.push(this.summarizeSession(session));
+    this.focusSessions = sessions;
+    // Complexity by hour accumulation
+    sessions.forEach(s=>{
+      s.events.forEach(ev=>{
+        const h = new Date(ev.time).getHours();
+        const c = this.calculateComplexity(ev.domain, ev.title);
+        this.complexityByHour[h].total += c; this.complexityByHour[h].count++;
+      });
+    });
+    return sessions;
+  }
+
+  summarizeSession(events) {
+    const durationMs = events[events.length-1].time - events[0].time || 1;
+    const complexities = events.map(e=> this.calculateComplexity(e.domain, e.title));
+    const avgComplexity = complexities.reduce((a,b)=>a+b,0)/complexities.length;
+    return {
+      durationMinutes: +(durationMs/60000).toFixed(2),
+      pages: events.length,
+      avgComplexity: +avgComplexity.toFixed(2),
+      category: 'general',
+      events
+    };
+  }
+
+  // (5) Knowledge Graph Metrics
+  calculateGraphMetrics(nodes, links) {
+    // Betweenness centrality approximation via counting middle nodes in simple paths of length 2
+    const adjacency = new Map();
+    nodes.forEach(n=>adjacency.set(n.domain, new Set()));
+    links.forEach(l=>{ adjacency.get(l.source).add(l.target); });
+    const betweenness = new Map();
+    nodes.forEach(n=>betweenness.set(n.domain,0));
+    nodes.forEach(a=>{
+      nodes.forEach(b=>{
+        if (a===b) return;
+        const aNeighbors = adjacency.get(a.domain);
+        aNeighbors.forEach(mid=>{
+          const midNeighbors = adjacency.get(mid) || new Set();
+          if (midNeighbors.has(b.domain)) {
+            betweenness.set(mid, betweenness.get(mid)+1);
+          }
+        });
+      });
+    });
+    const hubs = [...betweenness.entries()].sort((a,b)=>b[1]-a[1]).slice(0,5).map(([d,v])=>({domain:d,score:v}));
+    // Entropy of domain visits
+    const totalVisits = nodes.reduce((a,b)=>a+b.visitCount,0) || 1;
+    const diversity = -nodes.reduce((sum,n)=>{ const p=n.visitCount/totalVisits; return sum + (p? p*Math.log2(p):0); },0);
+    return { betweenness: Object.fromEntries(betweenness), hubs, informationDiversity: +diversity.toFixed(3) };
+  }
+
+  // (6) Cognitive Rhythm Visualizations
+  renderCognitivePanels() {
+    const heatmapContainer = document.getElementById('complexity-heatmap');
+    const focusContainer = document.getElementById('focus-timeline');
+    if (heatmapContainer) this.renderComplexityHeatmap(heatmapContainer);
+    if (focusContainer) this.renderFocusTimeline(focusContainer);
+    this.renderInsights();
+  }
+
+  renderComplexityHeatmap(container) {
+    container.innerHTML = '';
+    const data = this.complexityByHour.map(o=> o.count? o.total/o.count : 0);
+    const w = 12*24; const h = 60;
+    const svg = d3.select(container).append('svg').attr('width', w).attr('height', h);
+    const color = d3.scaleSequential(d3.interpolateRdYlBu).domain([1,0]);
+    const peak = [];
+    data.forEach((v,i)=>{ if (v>0.7) peak.push(i); });
+    svg.selectAll('rect').data(data).enter().append('rect')
+      .attr('x',(d,i)=>i*12).attr('y',10).attr('width',12).attr('height',30)
+      .attr('fill',d=>color(d))
+      .attr('stroke',d=> d>0.7 ? '#000' : '#fff')
+      .append('title').text((d,i)=>`Hour ${i}: ${(d*100).toFixed(0)}% complexity`);
+    // Axis labels
+    svg.selectAll('text.hour').data([0,6,12,18,23]).enter().append('text').attr('class','hour')
+      .attr('x',d=>d*12+6).attr('y',55).attr('text-anchor','middle').attr('font-size',9).text(d=>d);
+  }
+
+  renderFocusTimeline(container) {
+    container.innerHTML='';
+    const sessions = this.focusSessions.slice(-30); // recent sessions
+    const w = container.clientWidth || 300;
+    const barH = 10;
+    const h = sessions.length * (barH+4) + 20;
+    const svg = d3.select(container).append('svg').attr('width', w).attr('height', h);
+    const maxDur = d3.max(sessions, s=>s.durationMinutes)||1;
+    const x = d3.scaleLinear().domain([0,maxDur]).range([60, w-10]);
+    const cats = [...new Set(sessions.map(s=>s.category))];
+    const catColor = d3.scaleOrdinal().domain(cats).range(['#4285f4','#f4b942','#ea4335','#34a853']);
+    svg.selectAll('g.session').data(sessions).enter().append('rect')
+      .attr('x',60).attr('y',(d,i)=>i*(barH+4)+10).attr('height',barH)
+      .attr('width',d=>x(d.durationMinutes)-60)
+      .attr('fill',d=>catColor(d.category))
+      .attr('opacity',d=>0.4 + 0.6*d.avgComplexity)
+      .append('title').text(d=>`Duration ${d.durationMinutes}m, complexity ${d.avgComplexity}`);
+    // Y labels
+    svg.selectAll('text.label').data(sessions).enter().append('text')
+      .attr('x',0).attr('y',(d,i)=>i*(barH+4)+18).attr('font-size',9).text((d,i)=>`S${i+1}`);
+    // X axis ticks
+    const ticks = x.ticks(4);
+    svg.selectAll('text.xtick').data(ticks).enter().append('text')
+      .attr('x',d=>x(d)).attr('y',h-4).attr('font-size',9).attr('text-anchor','middle').text(d=>d+'m');
+  }
+
+  // (7) Insights Generation
+  generateInsights() {
+    const hourlyComplexity = this.complexityByHour.map(o=> o.count? o.total/o.count : 0);
+    const peakComplexityHours = hourlyComplexity.map((v,i)=>({v,i})).filter(o=>o.v>0.7).map(o=>o.i);
+    const avgFocusDuration = this.focusSessions.length ? this.focusSessions.reduce((a,b)=>a+b.durationMinutes,0)/this.focusSessions.length : 0;
+    // Topic switch rate = context_switch+topic_shift per hour of data (approx over hours covered)
+    const totalHoursObserved = this.temporalAnalysis ? this.temporalAnalysis.hourlyActivity.filter(c=>c>0).length || 1 : 1;
+    const topicSwitches = (this.transitions.topic_shift||0)+(this.transitions.context_switch||0);
+    const topicSwitchRate = topicSwitches / totalHoursObserved;
+    const informationDiversity = this.graphMetrics?.informationDiversity || 0;
+    const insights = {
+      peakComplexityHours,
+      avgFocusDuration: +avgFocusDuration.toFixed(2),
+      topicSwitchRate: +topicSwitchRate.toFixed(2),
+      informationDiversity,
+      recommendations: []
+    };
+    if (topicSwitchRate > 10) insights.recommendations.push('High context switching detected. Consider time-blocking.');
+    if (this.temporalAnalysis) {
+      const mismatch = insights.peakComplexityHours.some(h=> !this.temporalAnalysis.peakHours.includes(h));
+      if (mismatch) insights.recommendations.push('Complexity-activity mismatch. Reschedule demanding tasks.');
+    }
+    if (avgFocusDuration < 5) insights.recommendations.push('Short focus periods. Minimize interruptions.');
+    return insights;
+  }
+
+  renderInsights() {
+    const list = document.getElementById('insights-list');
+    if (!list || !this.insights) return;
+    list.innerHTML='';
+    const items = [
+      `Peak Complexity Hours: ${this.insights.peakComplexityHours.join(', ') || 'None'}`,
+      `Avg Focus Duration: ${this.insights.avgFocusDuration}m`,
+      `Topic Switch Rate: ${this.insights.topicSwitchRate}/hr`,
+      `Information Diversity (entropy): ${this.insights.informationDiversity}`,
+      `Recommendations: ${this.insights.recommendations.length? '' : 'None'}`
+    ];
+    items.forEach(t=>{ const li=document.createElement('li'); li.textContent=t; list.appendChild(li); });
+    this.insights.recommendations.forEach(r=>{ const li=document.createElement('li'); li.textContent='• '+r; list.appendChild(li); });
+  }
+
+  // (8) Data Export
+  exportCognitiveAnalysis() {
+    const data = {
+      timestamp: new Date().toISOString(),
+      temporalPatterns: this.temporalAnalysis,
+      focusSessions: this.focusSessions,
+      complexityRhythm: this.complexityByHour.map(o=> o.count? +(o.total/o.count).toFixed(3):0),
+      informationChains: this.chains,
+      graphMetrics: this.graphMetrics,
+      insights: this.insights
+    };
+    const blob = new Blob([JSON.stringify(data,null,2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `cognitive-analysis-${Date.now()}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   }
 
   // Analyze the cognitive transition between two consecutive history items
