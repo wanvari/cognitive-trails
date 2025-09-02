@@ -19,11 +19,39 @@ const DEFAULT_NODE_COLOR = NODE_COLORS.default;
 
 // Transition analysis thresholds
 const TRANSITION_THRESHOLDS = {
-  TIME_RELATED: 5 * 60 * 1000,      // 5 minutes - related if within this time
-  TIME_TOPIC_SHIFT: 30 * 60 * 1000, // 30 minutes - topic shift if within this time
-  SEMANTIC_RELATED: 0.4,             // Word overlap threshold for related content
-  SEMANTIC_TOPIC_SHIFT: 0.1          // Word overlap threshold for topic shift
+  TIME_RELATED: 5 * 60 * 1000,
+  TIME_TOPIC_SHIFT: 30 * 60 * 1000,
+  SEMANTIC_RELATED: 0.4,
+  SEMANTIC_TOPIC_SHIFT: 0.1
 };
+
+// --- Local Semantic Analysis (No External Dependencies) ---
+const SEM_CFG = (typeof window !== 'undefined' && window.SEMANTIC_CONFIG) ? window.SEMANTIC_CONFIG : { thresholds:{ related:0.70, topicShift:0.40 } };
+
+// Calculate similarity using local semantic analyzer
+function calculateLocalSimilarity(itemA, itemB) {
+  console.log('=== LOCAL SEMANTIC SIMILARITY ===');
+  
+  if (!window.localSemanticAnalyzer) {
+    console.error('❌ Local semantic analyzer not available');
+    throw new Error('Local semantic analyzer not available');
+  }
+  
+  try {
+    const similarity = window.localSemanticAnalyzer.calculateSimilarity(itemA, itemB);
+    
+    console.log('✅ Local Similarity Result:', similarity.toFixed(6));
+    console.log('================================');
+    
+    return similarity;
+    
+  } catch (error) {
+    console.error('❌ Local similarity calculation failed:', error);
+    console.log('================================');
+    throw error;
+  }
+}
+// ----------------------------------------------------
 
 class HistoryGraphVisualizer {
   constructor() {
@@ -43,6 +71,13 @@ class HistoryGraphVisualizer {
   this.focusSessions = [];
   this.graphMetrics = null;
   this.insights = null;
+  // Interaction / focus state
+  this.selectionFrozen = false; // Whether a node focus is frozen
+  this.selectedNode = null;     // Currently selected (focused) node domain
+  this.linkSelection = null;    // d3 selection of links (set in createVisualization)
+  this.nodeSelection = null;    // d3 selection of nodes
+  this.labelSelection = null;   // d3 selection of labels
+  this.currentScale = 1;        // track zoom scale for LOD logic
     
     this.init();
   }
@@ -77,12 +112,34 @@ class HistoryGraphVisualizer {
     // Create a group for all graph elements (for pan/zoom)
     this.g = this.svg.append('g');
 
+    // Idempotently add refined arrow marker (thin open chevron) for directed edges
+    if (!this.svg.select('defs#graph-defs').node()) {
+      const defs = this.svg.append('defs').attr('id', 'graph-defs');
+      // Thin open chevron: direction cue without heavy visual weight
+      defs.append('marker')
+        .attr('id', 'arrowhead-thin')
+        .attr('viewBox', '0 -3 6 6')
+        .attr('refX', 6) // tip of arrow path at x=6
+        .attr('refY', 0)
+        .attr('markerWidth', 6)
+        .attr('markerHeight', 6)
+        .attr('orient', 'auto')
+        .attr('markerUnits', 'userSpaceOnUse') // constant size independent of stroke width
+        .append('path')
+        .attr('d', 'M0,-3 L6,0 L0,3')
+        .attr('fill', 'none')
+        .attr('stroke', 'currentColor')
+        .attr('stroke-width', 1.2)
+        .attr('stroke-linejoin', 'round')
+        .attr('opacity', 0.9);
+    }
+
     // Set up zoom behavior
     this.zoom = d3.zoom()
       .scaleExtent([0.1, 4])
       .wheelDelta((event) => {
-        // Custom wheel delta for smoother scrolling
-        return -event.deltaY * (event.deltaMode === 1 ? 0.05 : event.deltaMode ? 1 : 0.002);
+  // Slightly increased scroll zoom sensitivity (previous pixel factor 0.002 -> 0.003, line factor 0.05 -> 0.07)
+  return -event.deltaY * (event.deltaMode === 1 ? 0.07 : event.deltaMode ? 1 : 0.003);
       })
       .on('zoom', (event) => {
         // Validate transform values to prevent NaN
@@ -100,6 +157,8 @@ class HistoryGraphVisualizer {
         this.g.attr('transform', transform);
         // Update zoom level display
         this.updateZoomDisplay(transform.k);
+  // Apply level-of-detail updates (labels visibility & link thickness)
+  this.updateLevelOfDetail(transform.k);
       });
 
     this.svg.call(this.zoom);
@@ -346,41 +405,73 @@ class HistoryGraphVisualizer {
       for (let i = 0; i < sortedHistory.length - 1; i++) {
         const current = sortedHistory[i];
         const next = sortedHistory[i + 1];
-        
         const currentDomain = this.extractDomain(current.url);
         const nextDomain = this.extractDomain(next.url);
-        
-        // Skip self-transitions
         if (currentDomain === nextDomain) continue;
-        
-        // Calculate transition type
-        const transitionType = this.analyzeTransition(current, next);
-        
+        let transitionType, semanticSimilarity = 0;
+        try {
+          // Use local semantic analyzer
+          semanticSimilarity = calculateLocalSimilarity(
+            { url: current.url, title: current.title },
+            { url: next.url, title: next.title }
+          );
+          
+          const timeDiff = next.lastVisitTime - current.lastVisitTime;
+          
+          // Classify transition based on semantic similarity and time
+          if (timeDiff <= 5 * 60 * 1000 && semanticSimilarity >= SEM_CFG.thresholds.related) {
+            transitionType = 'related';
+          } else if (semanticSimilarity >= SEM_CFG.thresholds.topicShift || timeDiff <= 30 * 60 * 1000) {
+            transitionType = 'topic_shift';
+          } else {
+            transitionType = 'context_switch';
+          }
+          
+        } catch(err){
+          console.warn('❌ E5 similarity calculation failed, using basic heuristic:', err);
+          semanticSimilarity = this.calculateBasicSimilarity(current, next);
+          
+          console.log('Fallback Similarity Calculation:', {
+            currentUrl: current.url,
+            nextUrl: next.url,
+            fallbackSimilarity: semanticSimilarity.toFixed(6),
+            method: 'basic_fallback'
+          });
+          
+          // Use fallback classification
+          if (semanticSimilarity >= 0.7) {
+            transitionType = 'related';
+          } else if (semanticSimilarity >= 0.3) {
+            transitionType = 'topic_shift';
+          } else {
+            transitionType = 'context_switch';
+          }
+        }
         const connectionKey = `${currentDomain}-${nextDomain}`;
-        
         if (!connections.has(connectionKey)) {
-          const connection = {
-            source: currentDomain,
-            target: nextDomain,
-            weight: 1,
-            transitionType: transitionType,
-            color: TRANSITION_COLORS[transitionType] || TRANSITION_COLORS.default
+          const connection = { 
+            source: currentDomain, 
+            target: nextDomain, 
+            weight: 1, 
+            transitionType, 
+            color: TRANSITION_COLORS[transitionType] || TRANSITION_COLORS.default, 
+            lastTime: next.lastVisitTime,
+            similarity: semanticSimilarity // Store similarity score for visualization
           };
           connections.set(connectionKey, connection);
-          
-          // Debug first few connections
-          if (connections.size <= 10) {
-            console.log(`Connection ${connections.size}:`, currentDomain, '->', nextDomain, 'Type:', transitionType, 'Color:', connection.color);
-          }
+          if (connections.size <= 10) console.log(`Connection ${connections.size}:`, currentDomain, '->', nextDomain, 'Type:', transitionType, 'Similarity:', semanticSimilarity?.toFixed(3), 'Color:', connection.color);
         } else {
-          connections.get(connectionKey).weight++;
+          const conn = connections.get(connectionKey); 
+          conn.weight++; 
+          if (next.lastVisitTime > conn.lastTime) {
+            conn.lastTime = next.lastVisitTime;
+          }
+          // Update similarity score if we have a newer calculation
+          if (semanticSimilarity && semanticSimilarity > (conn.similarity || 0)) {
+            conn.similarity = semanticSimilarity;
+          }
         }
-        
-        // Update progress occasionally
-        if (i % 50 === 0) {
-          document.getElementById('loading').textContent = `Analyzing transitions... ${i}/${sortedHistory.length}`;
-          await new Promise(resolve => setTimeout(resolve, 1));
-        }
+        if (i % 50 === 0) { document.getElementById('loading').textContent = `Analyzing transitions... ${i}/${sortedHistory.length}`; await new Promise(resolve => setTimeout(resolve, 1)); }
       }
 
       // Store transitions for legend generation
@@ -718,173 +809,7 @@ class HistoryGraphVisualizer {
     URL.revokeObjectURL(url);
   }
 
-  // Analyze the cognitive transition between two consecutive history items
-  analyzeTransition(currentItem, nextItem) {
-    const timeDiff = nextItem.lastVisitTime - currentItem.lastVisitTime;
-    const semanticSimilarity = this.calculateSemanticSimilarity(currentItem, nextItem);
-    
-    let transitionType;
-    
-    // Quick transitions with similar content = related
-    if (timeDiff <= TRANSITION_THRESHOLDS.TIME_RELATED && semanticSimilarity >= TRANSITION_THRESHOLDS.SEMANTIC_RELATED) {
-      transitionType = 'related';
-    }
-    // Medium time gaps or some semantic overlap = topic shift
-    else if (timeDiff <= TRANSITION_THRESHOLDS.TIME_TOPIC_SHIFT || semanticSimilarity >= TRANSITION_THRESHOLDS.SEMANTIC_TOPIC_SHIFT) {
-      transitionType = 'topic_shift';
-    }
-    // Long gaps or no semantic connection = context switch
-    else {
-      transitionType = 'context_switch';
-    }
-    
-    // Debug first few transitions
-    if (Math.random() < 0.1) { // Log 10% of transitions
-      console.log('Transition analysis:', {
-        from: this.extractDomain(currentItem.url),
-        to: this.extractDomain(nextItem.url),
-        timeDiff: `${Math.round(timeDiff / 1000)}s`,
-        semantic: semanticSimilarity.toFixed(3),
-        type: transitionType
-      });
-    }
-    
-    return transitionType;
-  }
-
-  // Calculate semantic similarity between two history items using word overlap
-  calculateSemanticSimilarity(item1, item2) {
-    const text1 = `${item1.title || ''} ${this.extractDomain(item1.url)}`.toLowerCase();
-    const text2 = `${item2.title || ''} ${this.extractDomain(item2.url)}`.toLowerCase();
-    
-    const words1 = new Set(text1.match(/\b\w+\b/g) || []);
-    const words2 = new Set(text2.match(/\b\w+\b/g) || []);
-    
-    const intersection = new Set([...words1].filter(x => words2.has(x)));
-    const union = new Set([...words1, ...words2]);
-    
-    return intersection.size / union.size; // Jaccard similarity
-  }
-
-  // Calculate statistics about transitions for the legend
-  calculateTransitionStats(connections) {
-    const stats = {
-      related: 0,
-      topic_shift: 0,
-      context_switch: 0,
-      total: connections.size
-    };
-    
-    for (const connection of connections.values()) {
-      if (connection.transitionType in stats) {
-        stats[connection.transitionType]++;
-      }
-    }
-    
-    return stats;
-  }
-
-  async processHistoryDataFallback(historyItems) {
-    console.log('Using fallback processing with simple transition analysis');
-    const domainData = new Map();
-    const connections = new Map();
-    
-    // Simple processing - create nodes for each domain
-    historyItems.forEach(item => {
-      const domain = this.extractDomain(item.url);
-      
-      // Skip filtered domains
-      if (FILTERED_DOMAINS.some(d => domain.includes(d))) {
-        return;
-      }
-      
-      if (!domainData.has(domain)) {
-        domainData.set(domain, {
-          domain,
-          title: item.title,
-          visitCount: 0,
-          color: NODE_COLORS.default, // All nodes gray for transition focus
-          lastVisit: item.lastVisitTime,
-          urls: new Set()
-        });
-      }
-      
-      const data = domainData.get(domain);
-      data.visitCount++;
-      data.urls.add(item.url);
-      data.lastVisit = Math.max(data.lastVisit, item.lastVisitTime);
-    });
-
-    // Simple fallback transition analysis - just use time-based connections
-    const sortedHistory = historyItems
-      .filter(item => !FILTERED_DOMAINS.some(d => this.extractDomain(item.url).includes(d)))
-      .sort((a, b) => a.lastVisitTime - b.lastVisitTime);
-    
-    for (let i = 0; i < sortedHistory.length - 1; i++) {
-      const current = sortedHistory[i];
-      const next = sortedHistory[i + 1];
-      
-      const timeDiff = next.lastVisitTime - current.lastVisitTime;
-      
-      // Use simplified transition logic for fallback
-      if (timeDiff <= TRANSITION_THRESHOLDS.TIME_TOPIC_SHIFT) {
-        const sourceDomain = this.extractDomain(current.url);
-        const targetDomain = this.extractDomain(next.url);
-        
-        if (sourceDomain !== targetDomain) {
-          const key = `${sourceDomain}-${targetDomain}`;
-          const reverseKey = `${targetDomain}-${sourceDomain}`;
-          
-          // Simple transition type based on time only
-          let transitionType = 'related';
-          if (timeDiff > TRANSITION_THRESHOLDS.TIME_RELATED) {
-            transitionType = 'topic_shift';
-          }
-          
-          if (!connections.has(key) && !connections.has(reverseKey)) {
-            connections.set(key, {
-              source: sourceDomain,
-              target: targetDomain,
-              weight: 1,
-              transitionType: transitionType,
-              color: TRANSITION_COLORS[transitionType]
-            });
-          } else if (connections.has(key)) {
-            connections.get(key).weight++;
-          } else if (connections.has(reverseKey)) {
-            connections.get(reverseKey).weight++;
-          }
-        }
-      }
-    }
-
-    // Set up transition-based clusters for legend
-    this.clusters = new Map([
-      ['related', {
-        name: 'Related Transitions',
-        color: TRANSITION_COLORS.related,
-        items: [],
-        representative: 'Quick attention flow'
-      }],
-      ['topic_shift', {
-        name: 'Topic Shifts', 
-        color: TRANSITION_COLORS.topic_shift,
-        items: [],
-        representative: 'Moderate cognitive jumps'
-      }],
-      ['context_switch', {
-        name: 'Context Switches',
-        color: TRANSITION_COLORS.context_switch,
-        items: [],
-        representative: 'Major cognitive shifts'
-      }]
-    ]);
-
-    return {
-      nodes: Array.from(domainData.values()),
-      links: Array.from(connections.values())
-    };
-  }
+  // (Removed legacy analyzeTransition & calculateSemanticSimilarity – ML worker now sole path)
 
   extractDomain(url) {
     try {
@@ -895,114 +820,68 @@ class HistoryGraphVisualizer {
     }
   }
 
-  // Create enhanced semantic input text from URL and title
-  createSemanticInput(url, title = '') {
-    try {
-      const urlObj = new URL(url);
-      const domain = urlObj.hostname.replace('www.', '');
-      const path = urlObj.pathname.replace(/^\/+|\/+$/g, '').toLowerCase();
-      const pathParts = path.split('/').filter(part => part && !part.match(/^\d+$/));
-      
-      // Extract meaningful words from path
-      const pathWords = pathParts.flatMap(part => 
-        part.split(/[-_]/).filter(word => word.length > 2)
-      );
-      
-      // Clean title
-      const titleWords = title.toLowerCase()
-        .replace(/[^\w\s]/g, ' ')
-        .split(/\s+/)
-        .filter(word => word.length > 2);
-      
-      return {
-        domain,
-        path: pathWords.join(' '),
-        title: titleWords.join(' '),
-        fullText: `${domain} ${pathWords.join(' ')} ${titleWords.join(' ')}`
-      };
-    } catch {
-      return {
-        domain: url,
-        path: '',
-        title: title.toLowerCase(),
-        fullText: `${url} ${title}`.toLowerCase()
-      };
+  // Basic similarity calculation for fallback when semantic worker is unavailable
+  calculateBasicSimilarity(a, b) {
+    const aTitle = (a.title || '').toLowerCase();
+    const bTitle = (b.title || '').toLowerCase();
+    const aDomain = this.extractDomain(a.url);
+    const bDomain = this.extractDomain(b.url);
+    
+    // Domain similarity (same TLD gets points)
+    const aTld = aDomain.split('.').pop();
+    const bTld = bDomain.split('.').pop();
+    let similarity = aTld === bTld ? 0.2 : 0;
+    
+    // Title word overlap using Jaccard similarity
+    const aWords = new Set(aTitle.match(/\b\w+\b/g) || []);
+    const bWords = new Set(bTitle.match(/\b\w+\b/g) || []);
+    const intersection = new Set([...aWords].filter(x => bWords.has(x)));
+    const union = new Set([...aWords, ...bWords]);
+    
+    if (union.size > 0) {
+      similarity += (intersection.size / union.size) * 0.8;
     }
+    
+    return Math.min(1, similarity);
   }
 
-  // Calculate enhanced similarity score
-  calculateSimilarity(item1, item2) {
-    let score = 0;
-    
-    // Domain similarity (exact match gets high score)
-    if (item1.domain === item2.domain) {
-      score += 0.8;
-    }
-    
-    // Path similarity using Jaccard index
-    const path1Words = new Set(item1.path.split(' ').filter(w => w));
-    const path2Words = new Set(item2.path.split(' ').filter(w => w));
-    if (path1Words.size > 0 && path2Words.size > 0) {
-      const intersection = new Set([...path1Words].filter(x => path2Words.has(x)));
-      const union = new Set([...path1Words, ...path2Words]);
-      score += (intersection.size / union.size) * 0.3;
-    }
-    
-    // Title similarity using word overlap
-    const title1Words = new Set(item1.title.split(' ').filter(w => w.length > 2));
-    const title2Words = new Set(item2.title.split(' ').filter(w => w.length > 2));
-    if (title1Words.size > 0 && title2Words.size > 0) {
-      const intersection = new Set([...title1Words].filter(x => title2Words.has(x)));
-      const union = new Set([...title1Words, ...title2Words]);
-      score += (intersection.size / union.size) * 0.4;
-    }
-    
-    // Topic category similarity
-    const topic1 = this.classifyEnhancedTopic(item1);
-    const topic2 = this.classifyEnhancedTopic(item2);
-    if (topic1 === topic2 && topic1 !== 'misc') {
-      score += 0.3;
-    }
-    
-    return score;
+  // (Removed legacy createSemanticInput / calculateSimilarity utilities)
+
+  // (RESTORED) Calculate statistics about transitions for legend
+  calculateTransitionStats(connections) {
+    const stats = { related:0, topic_shift:0, context_switch:0, total: connections.size };
+    for(const c of connections.values()) { if (stats.hasOwnProperty(c.transitionType)) stats[c.transitionType]++; }
+    return stats;
   }
 
-  // Enhanced topic classification
-  classifyEnhancedTopic(semanticInput) {
-    const { domain, path, title, fullText } = semanticInput;
-    let bestTopic = 'misc';
-    let bestScore = 0;
-    
-    for (const [topicName, topicData] of Object.entries(ENHANCED_TOPICS)) {
-      let score = 0;
-      
-      // Domain exact match
-      if (topicData.domains.some(d => domain.includes(d) || d.includes(domain))) {
-        score += 2.0 * topicData.weight;
-      }
-      
-      // Path keyword matching
-      const pathScore = topicData.paths.reduce((sum, pathKeyword) => {
-        return sum + (path.includes(pathKeyword) ? 1 : 0);
-      }, 0);
-      score += (pathScore / topicData.paths.length) * topicData.weight;
-      
-      // Title and content keyword matching
-      const keywordScore = topicData.keywords.reduce((sum, keyword) => {
-        const titleMatches = (title.match(new RegExp(keyword, 'gi')) || []).length;
-        const fullTextMatches = (fullText.match(new RegExp(keyword, 'gi')) || []).length;
-        return sum + titleMatches * 0.5 + fullTextMatches * 0.2;
-      }, 0);
-      score += keywordScore * topicData.weight;
-      
-      if (score > bestScore) {
-        bestScore = score;
-        bestTopic = topicName;
-      }
+  // (RESTORED) Fallback processing when semantic pipeline fails
+  async processHistoryDataFallback(historyItems) {
+    const domainData = new Map();
+    const connections = new Map();
+    const sortedHistory = historyItems
+      .filter(item => !FILTERED_DOMAINS.some(d => this.extractDomain(item.url).includes(d)))
+      .sort((a,b)=> a.lastVisitTime - b.lastVisitTime);
+    for(const item of sortedHistory){
+      const domain = this.extractDomain(item.url);
+      if(!domainData.has(domain)) domainData.set(domain,{ domain, title:item.title, visitCount:0, color: DEFAULT_NODE_COLOR, lastVisit:item.lastVisitTime, urls:new Set() });
+      const d=domainData.get(domain); d.visitCount++; d.urls.add(item.url); d.lastVisit = Math.max(d.lastVisit, item.lastVisitTime);
     }
-    
-    return bestScore > 0.5 ? bestTopic : 'misc';
+    for(let i=0;i<sortedHistory.length-1;i++){
+      const a=sortedHistory[i], b=sortedHistory[i+1];
+      const da=this.extractDomain(a.url), db=this.extractDomain(b.url);
+      if(da===db) continue;
+      const key=`${da}-${db}`;
+      const timeDiff = b.lastVisitTime - a.lastVisitTime;
+      let transitionType = timeDiff <= TRANSITION_THRESHOLDS.TIME_RELATED ? 'related' : (timeDiff <= TRANSITION_THRESHOLDS.TIME_TOPIC_SHIFT ? 'topic_shift':'context_switch');
+      // Add basic similarity score based on domain and title matching for fallback
+      const similarity = this.calculateBasicSimilarity(a, b);
+      if(!connections.has(key)) connections.set(key,{ source:da,target:db,weight:1,transitionType,color:TRANSITION_COLORS[transitionType], lastTime:b.lastVisitTime, similarity }); else { const c=connections.get(key); c.weight++; c.lastTime=b.lastVisitTime; if(similarity > (c.similarity || 0)) c.similarity=similarity; }
+    }
+    this.transitions = this.calculateTransitionStats(connections);
+    return { nodes: Array.from(domainData.values()), links: Array.from(connections.values()) };
   }
+
+  // (Removed legacy classifyEnhancedTopic)
 
 
 
@@ -1067,42 +946,48 @@ class HistoryGraphVisualizer {
           target: 'stackoverflow.com',
           weight: 5,
           transitionType: 'related',
-          color: TRANSITION_COLORS.related
+          color: TRANSITION_COLORS.related,
+          similarity: 0.85
         },
         {
           source: 'stackoverflow.com', 
           target: 'facebook.com',
           weight: 3,
           transitionType: 'topic_shift',
-          color: TRANSITION_COLORS.topic_shift
+          color: TRANSITION_COLORS.topic_shift,
+          similarity: 0.45
         },
         {
           source: 'facebook.com',
           target: 'amazon.com',
           weight: 2,
           transitionType: 'context_switch',
-          color: TRANSITION_COLORS.context_switch
+          color: TRANSITION_COLORS.context_switch,
+          similarity: 0.15
         },
         {
           source: 'amazon.com',
           target: 'netflix.com',
           weight: 4,
           transitionType: 'related',
-          color: TRANSITION_COLORS.related
+          color: TRANSITION_COLORS.related,
+          similarity: 0.72
         },
         {
           source: 'netflix.com',
           target: 'news.bbc.co.uk',
           weight: 2,
           transitionType: 'topic_shift',
-          color: TRANSITION_COLORS.topic_shift
+          color: TRANSITION_COLORS.topic_shift,
+          similarity: 0.35
         },
         {
           source: 'youtube.com',
           target: 'github.com',
           weight: 1,
           transitionType: 'context_switch',
-          color: TRANSITION_COLORS.context_switch
+          color: TRANSITION_COLORS.context_switch,
+          similarity: 0.08
         }
       ];
       
@@ -1122,8 +1007,13 @@ class HistoryGraphVisualizer {
   }
 
   createVisualization(data) {
-    // Clear existing visualization
+    // Clear existing visualization and reset selections
     this.g.selectAll('*').remove();
+    this.linkSelection = null;
+    this.nodeSelection = null;
+    this.labelSelection = null;
+    this.linkLabelSelection = null;
+    this.linkLabelBgSelection = null;
     
     // Validate data
     if (!data.nodes || data.nodes.length === 0) {
@@ -1153,15 +1043,21 @@ class HistoryGraphVisualizer {
       .selectAll('line')
       .data(this.links)
       .enter()
-      .append('line')
+  .append('line')
       .attr('class', 'link')
       .attr('stroke', d => {
         const color = d.color || TRANSITION_COLORS.default;
         console.log('Setting link stroke color:', color, 'for transition type:', d.transitionType);
         return color;
       })
-      .attr('stroke-width', d => Math.max(4, Math.sqrt(d.weight) + 3)) // Thick lines for visibility
-      .attr('stroke-opacity', 1.0); // Fully opaque
+      .attr('stroke-width', d => {
+        d._baseWidth = Math.max(4, Math.sqrt(d.weight) + 3); // store for zoom scaling
+        return d._baseWidth;
+      })
+      .attr('stroke-opacity', d => this.linkRecencyOpacity(d))
+  .attr('marker-end', 'url(#arrowhead-thin)')
+  .attr('stroke-linecap', 'round')
+      .style('color', d => d.color || TRANSITION_COLORS.default); // enables currentColor for marker
 
     // Create nodes (all gray since we focus on transitions)
     const node = this.g.append('g')
@@ -1173,14 +1069,14 @@ class HistoryGraphVisualizer {
       .attr('r', d => this.getNodeRadius(d))
       .attr('fill', DEFAULT_NODE_COLOR) // All nodes are gray
       .attr('stroke', '#fff')
-      .attr('stroke-width', 2)
+      .attr('stroke-width', d => this.nodeRecencyStrokeWidth(d))
       .call(d3.drag()
         .on('start', (event, d) => this.dragStarted(event, d))
         .on('drag', (event, d) => this.dragged(event, d))
         .on('end', (event, d) => this.dragEnded(event, d)));
 
     // Add labels for larger nodes
-    const label = this.g.append('g')
+  const label = this.g.append('g')
       .selectAll('text')
       .data(this.nodes.filter(d => d.visitCount > 2))
       .enter()
@@ -1188,8 +1084,68 @@ class HistoryGraphVisualizer {
       .attr('class', 'node-label')
       .text(d => d.domain.length > 15 ? d.domain.substring(0, 12) + '...' : d.domain);
 
+  // Store selections for later (zoom LOD & focus interactions)
+  this.linkSelection = link;
+  this.nodeSelection = node;
+  this.labelSelection = label;
+
+    // Add similarity score labels on links with background for better visibility
+    const linkLabelGroup = this.g.append('g').attr('class', 'link-labels');
+    
+    // Add background rectangles for labels
+    const linkLabelBgs = linkLabelGroup
+      .selectAll('rect')
+      .data(this.links)
+      .enter()
+      .append('rect')
+      .attr('class', 'link-label-bg')
+      .style('fill', 'rgba(255, 255, 255, 0.8)')
+      .style('stroke', 'rgba(0, 0, 0, 0.1)')
+      .style('stroke-width', '0.5px')
+      .style('rx', '2')
+      .style('ry', '2')
+      .style('pointer-events', 'none');
+    
+    // Add text labels
+    const linkLabels = linkLabelGroup
+      .selectAll('text')
+      .data(this.links)
+      .enter()
+      .append('text')
+      .attr('class', 'link-label')
+      .style('font-size', '9px')
+      .style('fill', '#444')
+      .style('text-anchor', 'middle')
+      .style('dominant-baseline', 'middle')
+      .style('pointer-events', 'none')
+      .style('font-weight', '600')
+      .text(d => d.similarity ? d.similarity.toFixed(2) : '');
+
+    // Store link labels selection for later updates
+    this.linkLabelSelection = linkLabels;
+    this.linkLabelBgSelection = linkLabelBgs;
+
     // Add tooltips
     const tooltip = d3.select('#tooltip');
+    
+    // Link tooltips to show detailed similarity information
+    link
+      .on('mouseover', (event, d) => {
+        tooltip
+          .style('opacity', 1)
+          .style('left', (event.pageX + 10) + 'px')
+          .style('top', (event.pageY - 10) + 'px')
+          .html(`
+            <strong>${d.source.domain || d.source} → ${d.target.domain || d.target}</strong><br/>
+            Transition type: ${d.transitionType}<br/>
+            Semantic similarity: ${d.similarity ? d.similarity.toFixed(3) : 'N/A'}<br/>
+            Connection weight: ${d.weight}<br/>
+            <em>Higher similarity = more related content</em>
+          `);
+      })
+      .on('mouseout', (event, d) => {
+        tooltip.style('opacity', 0);
+      });
     
     node
       .on('mouseover', (event, d) => {
@@ -1200,21 +1156,73 @@ class HistoryGraphVisualizer {
           .html(`
             <strong>${d.domain}</strong><br/>
             Visits: ${d.visitCount}<br/>
-            Last visit: ${new Date(d.lastVisit).toLocaleDateString()}<br/>
+            Last visit: ${new Date(d.lastVisit).toLocaleString()}<br/>
             <em>Connections show attention flow patterns</em>
           `);
+        if (!this.selectionFrozen) {
+          this.applyFocusHighlight(d);
+        }
       })
-      .on('mouseout', () => {
+      .on('mouseout', (event, d) => {
         tooltip.style('opacity', 0);
+        if (!this.selectionFrozen) {
+          this.clearFocusHighlight();
+        }
+      })
+      .on('click', (event, d) => {
+        if (this.selectionFrozen && this.selectedNode === d.domain) {
+          // Unfreeze
+            this.selectionFrozen = false;
+            this.selectedNode = null;
+            this.clearFocusHighlight();
+        } else {
+          this.selectionFrozen = true;
+          this.selectedNode = d.domain;
+          this.applyFocusHighlight(d);
+        }
+        event.stopPropagation();
       });
+
+    // Clicking background clears frozen selection
+    this.svg.on('click', () => {
+      if (this.selectionFrozen) {
+        this.selectionFrozen = false;
+        this.selectedNode = null;
+        this.clearFocusHighlight();
+      }
+    });
 
     // Update positions on simulation tick
     this.simulation.on('tick', () => {
-      link
-        .attr('x1', d => isNaN(d.source.x) ? 0 : d.source.x)
-        .attr('y1', d => isNaN(d.source.y) ? 0 : d.source.y)
-        .attr('x2', d => isNaN(d.target.x) ? 0 : d.target.x)
-        .attr('y2', d => isNaN(d.target.y) ? 0 : d.target.y);
+      // Shorten lines so arrowheads sit just outside node borders (avoids overlap clutter)
+      link.each((d, i, nodes) => {
+        const sx = isNaN(d.source.x) ? 0 : d.source.x;
+        const sy = isNaN(d.source.y) ? 0 : d.source.y;
+        const tx = isNaN(d.target.x) ? 0 : d.target.x;
+        const ty = isNaN(d.target.y) ? 0 : d.target.y;
+        const sr = this.getNodeRadius(d.source) + 2; // slight padding from source node
+        const tr = this.getNodeRadius(d.target) + 6; // extra space for arrow glyph
+        let dx = tx - sx;
+        let dy = ty - sy;
+        let dist = Math.sqrt(dx*dx + dy*dy) || 1;
+        // If nodes are extremely close, skip shortening to avoid inversion
+        if (dist < sr + tr + 4) {
+          d._sx = sx; d._sy = sy; d._tx = tx; d._ty = ty;
+        } else {
+          const ratioS = sr / dist;
+          const ratioT = tr / dist;
+            d._sx = sx + dx * ratioS;
+            d._sy = sy + dy * ratioS;
+            d._tx = tx - dx * ratioT;
+            d._ty = ty - dy * ratioT;
+        }
+        
+        d3.select(nodes[i])
+          .attr('x1', d._sx)
+          .attr('y1', d._sy)
+          .attr('x2', d._tx)
+          .attr('y2', d._ty);
+      });
 
       node
         .attr('cx', d => isNaN(d.x) ? this.width / 2 : d.x)
@@ -1223,10 +1231,48 @@ class HistoryGraphVisualizer {
       label
         .attr('x', d => isNaN(d.x) ? this.width / 2 : d.x)
         .attr('y', d => isNaN(d.y) ? this.height / 2 : d.y + 4);
+
+      // Update link similarity labels - calculate midpoint from actual link positions
+      if (this.linkLabelSelection) {
+        const shouldShow = (d) => d.similarity && d.similarity > 0.1 && this.currentScale >= 1.2;
+        
+        // Position text labels
+        this.linkLabelSelection
+          .attr('x', d => {
+            const sx = isNaN(d.source.x) ? 0 : d.source.x;
+            const tx = isNaN(d.target.x) ? 0 : d.target.x;
+            return (sx + tx) / 2;
+          })
+          .attr('y', d => {
+            const sy = isNaN(d.source.y) ? 0 : d.source.y;
+            const ty = isNaN(d.target.y) ? 0 : d.target.y;
+            return (sy + ty) / 2;
+          })
+          .style('display', d => shouldShow(d) ? 'block' : 'none');
+          
+        // Position background rectangles
+        if (this.linkLabelBgSelection) {
+          this.linkLabelBgSelection
+            .attr('x', d => {
+              const sx = isNaN(d.source.x) ? 0 : d.source.x;
+              const tx = isNaN(d.target.x) ? 0 : d.target.x;
+              return (sx + tx) / 2 - 10; // Center the 20px wide rectangle
+            })
+            .attr('y', d => {
+              const sy = isNaN(d.source.y) ? 0 : d.source.y;
+              const ty = isNaN(d.target.y) ? 0 : d.target.y;
+              return (sy + ty) / 2 - 6; // Center the 12px high rectangle
+            })
+            .attr('width', 20)
+            .attr('height', 12)
+            .style('display', d => shouldShow(d) ? 'block' : 'none');
+        }
+      }
     });
 
     // Initialize zoom display
     this.updateZoomDisplay(1);
+  this.updateLevelOfDetail(1); // Initial LOD state
     
     // Auto-fit the graph after simulation settles - disabled temporarily to prevent NaN errors
     // setTimeout(() => {
@@ -1235,6 +1281,134 @@ class HistoryGraphVisualizer {
     
     // Update legend with dynamic clusters
     this.updateLegend();
+  }
+
+  // Map link recency (ms timestamp) to opacity (recent = brighter)
+  linkRecencyOpacity(link) {
+    const now = Date.now();
+    const ageMs = Math.max(0, now - (link.lastTime || now));
+    const ageHours = ageMs / 3600000;
+  // Adjusted decay: keep more color presence while still signaling age
+  // <2h 1.0, <24h 0.8, <7d 0.5, else 0.35 (never disappear into near-white)
+  if (ageHours < 2) return 1.0;
+  if (ageHours < 24) return 0.8;
+  if (ageHours < 24 * 7) return 0.5;
+  return 0.35;
+  }
+
+  // Node recency halo via stroke width
+  nodeRecencyStrokeWidth(node) {
+    const now = Date.now();
+    const ageMs = Math.max(0, now - (node.lastVisit || now));
+    const ageHours = ageMs / 3600000;
+    if (ageHours < 2) return 3.5; // subtle emphasis
+    if (ageHours < 24) return 2.5;
+    return 2;
+  }
+
+  // Adjust visibility & thickness based on zoom scale
+  updateLevelOfDetail(scale) {
+    this.currentScale = scale;
+    if (this.labelSelection) {
+      const show = scale >= 0.9; // threshold for label visibility
+      this.labelSelection.style('display', show ? 'block' : 'none');
+    }
+    if (this.linkLabelSelection) {
+      const showLinkLabels = scale >= 1.2; // Show similarity scores when zoomed in
+      const shouldShow = d => showLinkLabels && d.similarity && d.similarity > 0.1;
+      
+      this.linkLabelSelection.style('display', d => shouldShow(d) ? 'block' : 'none');
+      if (this.linkLabelBgSelection) {
+        this.linkLabelBgSelection.style('display', d => shouldShow(d) ? 'block' : 'none');
+      }
+      
+      // Force position update when zoom changes
+      this.linkLabelSelection
+        .attr('x', d => {
+          const sx = isNaN(d.source.x) ? 0 : d.source.x;
+          const tx = isNaN(d.target.x) ? 0 : d.target.x;
+          return (sx + tx) / 2;
+        })
+        .attr('y', d => {
+          const sy = isNaN(d.source.y) ? 0 : d.source.y;
+          const ty = isNaN(d.target.y) ? 0 : d.target.y;
+          return (sy + ty) / 2;
+        });
+        
+      if (this.linkLabelBgSelection) {
+        this.linkLabelBgSelection
+          .attr('x', d => {
+            const sx = isNaN(d.source.x) ? 0 : d.source.x;
+            const tx = isNaN(d.target.x) ? 0 : d.target.x;
+            return (sx + tx) / 2 - 10;
+          })
+          .attr('y', d => {
+            const sy = isNaN(d.source.y) ? 0 : d.source.y;
+            const ty = isNaN(d.target.y) ? 0 : d.target.y;
+            return (sy + ty) / 2 - 6;
+          });
+      }
+    }
+    if (this.linkSelection) {
+      this.linkSelection
+        .attr('stroke-width', d => {
+          const base = d._baseWidth || 2;
+          const adjusted = scale < 1 ? Math.max(0.6, base * (0.75 + scale * 0.25)) : base; // gentle thinning
+          return adjusted;
+        })
+  .attr('marker-end', 'url(#arrowhead-thin)'); // always keep refined arrow
+    }
+  }
+
+  // Highlight ego network of node d
+  applyFocusHighlight(d) {
+    if (!this.linkSelection || !this.nodeSelection) return;
+    const domain = d.domain;
+    // Determine neighbors
+    const neighborSet = new Set([domain]);
+    this.linkSelection.each(l => {
+      const s = (l.source.domain || l.source);
+      const t = (l.target.domain || l.target);
+      if (s === domain || t === domain) {
+        neighborSet.add(s); neighborSet.add(t);
+      }
+    });
+    // Update nodes
+    this.nodeSelection.style('opacity', n => neighborSet.has(n.domain) ? 1 : 0.15);
+    // Update links (full opacity for incident, very low for others)
+    this.linkSelection.style('opacity', l => {
+      const s = (l.source.domain || l.source);
+      const t = (l.target.domain || l.target);
+      if (s === domain || t === domain) return 1;
+      return 0.05;
+    });
+    // Update link labels opacity to match links
+    if (this.linkLabelSelection) {
+      this.linkLabelSelection.style('opacity', l => {
+        const s = (l.source.domain || l.source);
+        const t = (l.target.domain || l.target);
+        if (s === domain || t === domain) return 1;
+        return 0.05;
+      });
+      
+      if (this.linkLabelBgSelection) {
+        this.linkLabelBgSelection.style('opacity', l => {
+          const s = (l.source.domain || l.source);
+          const t = (l.target.domain || l.target);
+          if (s === domain || t === domain) return 1;
+          return 0.05;
+        });
+      }
+    }
+  }
+
+  // Restore default opacities (links reflect recency fading)
+  clearFocusHighlight() {
+    if (this.nodeSelection) this.nodeSelection.style('opacity', 1);
+    if (this.linkSelection) this.linkSelection.style('opacity', d => this.linkRecencyOpacity(d));
+    if (this.linkLabelSelection) this.linkLabelSelection.style('opacity', 1);
+    if (this.linkLabelBgSelection) this.linkLabelBgSelection.style('opacity', 1);
+    if (this.linkSelection) this.linkSelection.attr('marker-end', 'url(#arrowhead-thin)');
   }
 
   getNodeRadius(d) {
@@ -1329,17 +1503,17 @@ class HistoryGraphVisualizer {
       { 
         type: 'related', 
         label: 'Related Flow', 
-        description: 'Quick transitions between similar content (staying focused)' 
+        description: 'Quick transitions between similar content (similarity > 0.70)' 
       },
       { 
         type: 'topic_shift', 
         label: 'Topic Shift', 
-        description: 'Moderate cognitive jumps to related areas' 
+        description: 'Moderate cognitive jumps to related areas (similarity 0.40-0.70)' 
       },
       { 
         type: 'context_switch', 
         label: 'Context Switch', 
-        description: 'Major mental gear changes to different topics' 
+        description: 'Major mental gear changes to different topics (similarity < 0.40)' 
       }
     ];
     
@@ -1365,6 +1539,12 @@ class HistoryGraphVisualizer {
       legendItem.appendChild(labelSpan);
       legend.appendChild(legendItem);
     });
+    
+    // Add similarity score explanation
+    const similarityNote = document.createElement('div');
+    similarityNote.style.cssText = 'font-size: 11px; color: #666; margin-top: 8px; font-style: italic;';
+    similarityNote.textContent = 'Zoom in (>120%) to see similarity scores on connection lines';
+    legend.appendChild(similarityNote);
     
     // Insert the new legend
     const header = document.querySelector('header');
@@ -1414,6 +1594,22 @@ document.addEventListener('DOMContentLoaded', () => {
   
   try {
     new HistoryGraphVisualizer();
+    if (window.__SEMANTIC_DEV__?.testHarness) {
+      console.log('[SemanticTest] Harness active: will sample consecutive pairs after 5s');
+      setTimeout(async ()=>{
+        if(!semanticWorker) return;
+        const history = await chrome.history.search({ text:'', maxResults:120, startTime: Date.now()-24*3600*1000 });
+        history.sort((a,b)=> a.lastVisitTime - b.lastVisitTime);
+        const samples = [];
+        for(let i=0;i<history.length-1 && samples.length<25;i++){
+          const a=history[i], b=history[i+1];
+          const jac = (function(){
+            const ta=(a.title||'').toLowerCase().match(/\b\w+\b/g)||[]; const tb=(b.title||'').toLowerCase().match(/\b\w+\b/g)||[]; const sa=new Set(ta), sb=new Set(tb); let inter=0; sa.forEach(t=>{ if(sb.has(t)) inter++; }); const uni=new Set([...sa,...sb]); return uni.size? inter/uni.size:0; })();
+          try { const res = await callSemantic('similarityForPair',{ a:{url:a.url,title:a.title}, b:{url:b.url,title:b.title} }); samples.push({ jac: +jac.toFixed(3), emb: +res.sim.toFixed(3), a:a.title?.slice(0,40)||'', b:b.title?.slice(0,40)||'' }); } catch{}
+        }
+        console.table(samples);
+      }, 5000);
+    }
   } catch (error) {
     console.error('Failed to initialize visualizer:', error);
     document.getElementById('loading').textContent = `Initialization error: ${error.message}`;
